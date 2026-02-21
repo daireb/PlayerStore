@@ -31,6 +31,7 @@ export type ObservableTable<T> = {
 type InternalObservableTable<T> = ObservableTable<T> & {
 	_table: T & { [string]: any },
 	_signals: { [string]: typeof(Signal.new()) },
+	_validator: ((path: string, value: any) -> (boolean, string?))?,
 }
 
 --------------------------------------------------------------------------------
@@ -46,10 +47,11 @@ local ROOT = ""
 local ObservableTable = {}
 ObservableTable.__index = ObservableTable
 
-function ObservableTable.wrap<T>(tbl: T): ObservableTable<T>
+function ObservableTable.wrap<T>(tbl: T, validator: ((path: string, value: any) -> (boolean, string?))?): ObservableTable<T>
 	local self = setmetatable({}, ObservableTable) :: any
 	self._table = tbl or {}
 	self._signals = {}
+	self._validator = validator
 	return self
 end
 
@@ -78,6 +80,13 @@ function ObservableTable.get<T>(self: InternalObservableTable<T>, path: string?)
 end
 
 function ObservableTable.set<T>(self: InternalObservableTable<T>, path: string, value: any)
+	if self._validator then
+		local ok, err = self._validator(path, value)
+		if not ok then
+			error(`[PlayerStore] Invalid write to "{path}": {err}`)
+		end
+	end
+
 	local keys = string.split(path, "/")
 	local current: any = self._table
 

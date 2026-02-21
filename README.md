@@ -154,6 +154,17 @@ Parentheses are only needed when composing markers: `private(map {})`.
 | `onSessionEnd(callback)` | | Override session-end behavior (default: kick player) |
 | `wipeData(player)` | | Reset data to template defaults |
 
+### Write validation
+
+All writes through `observe():set()` are automatically validated against the schema. Invalid paths and type mismatches error immediately:
+
+```lua
+obs:set("Resources/Cash", 100)       -- ok
+obs:set("Resources/Cash", "wrong")   -- errors: type mismatch
+obs:set("Fake/Path", 5)              -- errors: invalid path
+obs:set("Inventory/Sword", 3)        -- ok (map path, any key allowed)
+```
+
 ### Session end behavior
 
 By default, players are kicked if their ProfileStore session ends for any reason (e.g. claimed by another server, or unloadAsync is called). Override with `onSessionEnd` if you need custom handling:

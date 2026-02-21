@@ -18,6 +18,7 @@ flowchart TD
         ServerStore["ServerStore.luau"]
         ClientStoreModule["ClientStore.luau"]
         OT["ObservableTable.luau"]
+        Val["Validation.luau"]
         Sig["Signal.luau"]
     end
 
@@ -33,6 +34,7 @@ flowchart TD
     ClientScript --> ClientStoreModule
     ClientStoreModule --> UIBridge
     ServerStore --> OT
+    ServerStore --> Val
     ClientStoreModule --> OT
     OT --> Sig
     ServerStore --> SchemaModule
@@ -67,6 +69,7 @@ sequenceDiagram
     COT->>CB: Root listeners fire
 
     Note over SS,CB: Subsequent changes
+    SOT->>SOT: set() validates path/value against schema
     SOT->>SS: set("Resources/Cash", 100) triggers bind
     SS->>SS: Check privatePaths
     SS->>RE: FireClient(player, "Resources/Cash", 100)
@@ -90,7 +93,7 @@ Processes consumer-defined schema definitions into three artifacts:
 
 #### Type-erasure trick
 
-`map()` and `private()` return marker objects at runtime but use `:: any :: V` double-casting to preserve the consumer's type at the Luau type-checker level. This means the schema's generic type `T` accurately reflects the data structure without marker pollution.
+`map()` and `private()` return marker objects at runtime but cast the return as `:: never`. Since `never` is assignable to any type in Luau, this lets the type checker see the consumer's annotation (e.g. `{ [string]: number }`) while the runtime value is actually a marker table.
 
 ```
 Consumer writes:  Inventory = map {} :: { [string]: number }
@@ -120,18 +123,30 @@ This allows a root listener to see all changes (used for replication), a mid-lev
 listen: ((self, Callback) -> () -> ()) & ((self, string, Callback) -> () -> ())
 ```
 
+#### Optional validator
+
+`wrap(tbl, validator?)` accepts an optional `(path, value) -> (boolean, string?)` callback. When provided, `set()` calls it before writing and errors if the validator rejects. ServerStore passes in a validator backed by `Validation.validateWrite`, so all writes through `observe():set()` are automatically checked against the schema. ObservableTable itself has no schema dependency -- the validator is an opaque function.
+
 #### applyUpdate()
 
-Unlike `set()` which errors if the path doesn't exist, `applyUpdate()` creates intermediate tables as needed. Used by ClientStore to apply server-sent updates to an initially-empty table.
+Unlike `set()` which errors if the path doesn't exist, `applyUpdate()` creates intermediate tables as needed. Used by ClientStore to apply server-sent updates to an initially-empty table. Not subject to validation since it's only called internally by the replication system.
+
+### Validation.luau
+
+Structural validation extracted from ServerStore. Two functions:
+
+- **`validateData(data, template, mapPaths)`** -- Recursively checks that all template keys exist in the data with matching types. Skips deep validation for map paths. Used on load after migrations.
+- **`validateWrite(schema, path, value)`** -- Checks a single path/value pair against the schema. Resolves the path through the template, returns early for map paths (any key allowed), and type-checks leaf values. Used as the ObservableTable validator on the server side.
 
 ### ServerStore.luau
 
 Manages the full player data lifecycle:
 
-1. **Load** -- Starts a ProfileStore session, runs migrations, validates, wraps in ObservableTable
-2. **Replicate** -- Root bind on the ObservableTable filters private paths and sends changes to the client via a library-owned RemoteEvent
-3. **Save hooks** -- Consumers register callbacks that run before each ProfileStore save
-4. **Unload** -- Ends the session, destroys the ObservableTable, cleans up references
+1. **Load** -- Starts a ProfileStore session, runs migrations, validates data structure, wraps in ObservableTable with a schema-backed validator
+2. **Write validation** -- Every `set()` call on the ObservableTable is validated against the schema (path existence, type correctness, map path bypass)
+3. **Replicate** -- Root bind on the ObservableTable filters private paths and sends changes to the client via a library-owned RemoteEvent
+4. **Save hooks** -- Consumers register callbacks that run before each ProfileStore save
+5. **Unload** -- Ends the session, destroys the ObservableTable, cleans up references
 
 The RemoteEvent is created by the library (named `__PlayerStore_{storeId}`) and parented to ReplicatedStorage. Consumers don't manage networking.
 
@@ -172,6 +187,10 @@ ProfileStore is passed in via the `createServerStore` config rather than require
 ### Raw values with minimal markers
 
 Only two markers exist: `map()` and `private()`. Everything else uses raw Luau values. Wrapping every field in constructors (like `field(0)` instead of `0`) adds ceremony with no benefit for the 90% of fields that are plain values. The markers stand out visually, which is a feature -- they indicate genuinely special behavior at a glance.
+
+### Automatic write validation
+
+Every `set()` on the server-side ObservableTable validates the path and value against the schema. This catches typos, type errors, and invalid paths immediately at the call site rather than silently corrupting data that would only fail on the next load. The validation is injected via an opaque callback, keeping ObservableTable generic and decoupled from the schema system.
 
 ### Disconnect functions over Connection objects
 

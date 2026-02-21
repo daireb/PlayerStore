@@ -4,8 +4,14 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local validate = require(ReplicatedStorage.Packages.PlayerStore.Validation)
+local Validation = require(ReplicatedStorage.Packages.PlayerStore.Validation)
+local PlayerStore = require(ReplicatedStorage.Packages.PlayerStore)
 local TestRunner = require(ReplicatedStorage.Tests.Shared.TestRunner)
+
+local validate = Validation.validateData
+local schema = PlayerStore.schema
+local map = PlayerStore.map
+local private = PlayerStore.private
 
 local t = TestRunner.new("Validation")
 
@@ -181,6 +187,78 @@ t:test("deeply nested missing key fails with full path", function()
 	local ok, err = validate(data, template, {})
 	t:expect(not ok, "should fail")
 	t:expect(string.find(err, "A/B/C/D") ~= nil, "error has full path")
+end)
+
+--------------------------------------------------------------------------------
+-- validateWrite
+--------------------------------------------------------------------------------
+
+local testSchema = schema {
+	Resources = { Cash = 0, XP = 0 },
+	SelectedSlot = "Default",
+	IsVIP = false,
+	Inventory = map {} :: { [string]: number },
+	Settings = private { MusicVolume = 0.75 },
+}
+
+t:test("validateWrite accepts valid path and value", function()
+	local ok, err = Validation.validateWrite(testSchema, "Resources/Cash", 100)
+	t:expect(ok, "should pass")
+	t:expectNil(err, "no error")
+end)
+
+t:test("validateWrite accepts valid top-level path", function()
+	local ok, err = Validation.validateWrite(testSchema, "SelectedSlot", "Warrior")
+	t:expect(ok, "should pass")
+	t:expectNil(err, "no error")
+end)
+
+t:test("validateWrite rejects wrong type", function()
+	local ok, err = Validation.validateWrite(testSchema, "Resources/Cash", "not a number")
+	t:expect(not ok, "should fail")
+	t:expect(string.find(err, "Type mismatch") ~= nil, "mentions type mismatch")
+end)
+
+t:test("validateWrite rejects nonexistent path", function()
+	local ok, err = Validation.validateWrite(testSchema, "Nonexistent/Path", 5)
+	t:expect(not ok, "should fail")
+	t:expect(string.find(err, "Invalid path") ~= nil, "mentions invalid path")
+end)
+
+t:test("validateWrite rejects nonexistent top-level key", function()
+	local ok, err = Validation.validateWrite(testSchema, "FakeKey", 5)
+	t:expect(not ok, "should fail")
+	t:expect(string.find(err, "Invalid path") ~= nil, "mentions invalid path")
+end)
+
+t:test("validateWrite allows any key inside a map path", function()
+	local ok, err = Validation.validateWrite(testSchema, "Inventory/Sword", 3)
+	t:expect(ok, "should pass — map path allows any key")
+	t:expectNil(err, "no error")
+end)
+
+t:test("validateWrite allows setting map path itself", function()
+	local ok, err = Validation.validateWrite(testSchema, "Inventory", {})
+	t:expect(ok, "should pass — setting the map itself")
+	t:expectNil(err, "no error")
+end)
+
+t:test("validateWrite works with private paths", function()
+	local ok, err = Validation.validateWrite(testSchema, "Settings/MusicVolume", 0.5)
+	t:expect(ok, "should pass — private paths are still valid to write")
+	t:expectNil(err, "no error")
+end)
+
+t:test("validateWrite rejects wrong type on private path", function()
+	local ok, err = Validation.validateWrite(testSchema, "Settings/MusicVolume", "loud")
+	t:expect(not ok, "should fail")
+	t:expect(string.find(err, "Type mismatch") ~= nil, "mentions type mismatch")
+end)
+
+t:test("validateWrite rejects path through a non-table", function()
+	local ok, err = Validation.validateWrite(testSchema, "IsVIP/Something", true)
+	t:expect(not ok, "should fail — IsVIP is a boolean, not a table")
+	t:expect(string.find(err, "Invalid path") ~= nil, "mentions invalid path")
 end)
 
 t:run()

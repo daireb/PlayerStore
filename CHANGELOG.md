@@ -4,6 +4,18 @@ All notable changes to PlayerStore will be documented in this file.
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-02-21
+
+### Added
+
+- Automatic write validation: all `observe():set()` calls are now validated against the schema, catching invalid paths and type mismatches immediately
+- ObservableTable accepts an optional validator callback (used internally by ServerStore)
+- Validation tests covering type mismatches, invalid paths, map paths, and private paths
+
+### Changed
+
+- Extracted `Validation.luau` into its own module with `validateData` and `validateWrite` (internal)
+
 ## [0.1.3] - 2026-02-21
 
 ### Changed

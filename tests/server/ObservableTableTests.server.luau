@@ -4,7 +4,9 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local PlayerStore = require(ReplicatedStorage.Packages.PlayerStore)
 local ObservableTable = require(ReplicatedStorage.Packages.PlayerStore.ObservableTable)
+local Validation = require(ReplicatedStorage.Packages.PlayerStore.Validation)
 local TestRunner = require(ReplicatedStorage.Tests.Shared.TestRunner)
 
 local t = TestRunner.new("ObservableTable")
@@ -259,6 +261,67 @@ t:test("Destroy cleans up", function()
 	t:expectError(function()
 		obs:get("Cash")
 	end, "should error after destroy")
+end)
+
+--------------------------------------------------------------------------------
+-- Validator
+--------------------------------------------------------------------------------
+
+t:test("validator rejects invalid writes", function()
+	local obs = ObservableTable.wrap({ Cash = 0 }, function(path, value)
+		if path == "Cash" and typeof(value) ~= "number" then
+			return false, "Cash must be a number"
+		end
+		return true, nil
+	end)
+
+	t:expectError(function()
+		obs:set("Cash", "not a number")
+	end, "should error on invalid write")
+end)
+
+t:test("validator allows valid writes", function()
+	local data = { Cash = 0 }
+	local obs = ObservableTable.wrap(data, function(_path, _value)
+		return true, nil
+	end)
+
+	obs:set("Cash", 100)
+	t:expectEqual(data.Cash, 100, "write went through")
+end)
+
+t:test("no validator means no validation", function()
+	local data = { Cash = 0 }
+	local obs = ObservableTable.wrap(data)
+
+	obs:set("Cash", "anything goes")
+	t:expectEqual(data.Cash, "anything goes", "no validator, no check")
+end)
+
+t:test("schema validator allows writes inside map paths", function()
+	local testSchema = PlayerStore.schema {
+		Cash = 0,
+		Inventory = PlayerStore.map {} :: { [string]: number },
+	}
+
+	local data = { Cash = 0, Inventory = {} :: { [string]: number } }
+	local obs = ObservableTable.wrap(data, function(path, value)
+		return Validation.validateWrite(testSchema, path, value)
+	end)
+
+	obs:set("Inventory", { Sword = 1 })
+	t:expectEqual(data.Inventory.Sword, 1, "setting whole map works")
+
+	obs:set("Cash", 50)
+	t:expectEqual(data.Cash, 50, "normal field still works")
+
+	t:expectError(function()
+		obs:set("Cash", "wrong type")
+	end, "rejects wrong type on normal field")
+
+	t:expectError(function()
+		obs:set("FakePath", 123)
+	end, "rejects nonexistent path")
 end)
 
 t:run()

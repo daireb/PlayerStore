@@ -10,7 +10,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ObservableTable = require(script.Parent.ObservableTable)
-local validate = require(script.Parent.Validation)
+local Validation = require(script.Parent.Validation)
 
 local DATA_VERSION_KEY = "_DataVersion"
 
@@ -114,7 +114,7 @@ function ServerStore._runMigrations(self: any, player: Player, profile: any): bo
 	end
 
 	-- Validate final structure
-	local valid, errorPath = validate(data, self._schema.template :: any, self._schema.mapPaths)
+	local valid, errorPath = Validation.validateData(data, self._schema.template :: any, self._schema.mapPaths)
 	if not valid then
 		warn(`[PlayerStore] Validation failed for {player.DisplayName}: {errorPath}`)
 		player:Kick(`Data validation failed: {errorPath}. Please contact support.`)
@@ -190,8 +190,10 @@ function ServerStore.loadAsync(self: any, player: Player): boolean
 
 	self._profiles[player.UserId] = profile
 
-	-- Create observable wrapper and bind replication
-	local observable = ObservableTable.wrap(profile.Data)
+	-- Create observable wrapper with schema validation and bind replication
+	local observable = ObservableTable.wrap(profile.Data, function(path, value)
+		return Validation.validateWrite(self._schema, path, value)
+	end)
 	self._observables[player] = observable
 
 	observable:bind(function(_value, _path, specificValue, specificPath)
