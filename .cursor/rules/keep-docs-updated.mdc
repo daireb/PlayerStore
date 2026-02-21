@@ -1,0 +1,13 @@
+---
+description: Keep ARCHITECTURE.md and README.md in sync with code changes
+alwaysApply: true
+---
+
+# Keep Documentation Updated
+
+After making code changes, review whether ARCHITECTURE.md or README.md need updating:
+
+- **ARCHITECTURE.md** — Update when: module responsibilities change, new modules are added/removed, data flow changes, design decisions are added or invalidated, diagrams become inaccurate.
+- **README.md** — Update when: public API signatures change (new/removed/renamed methods, changed parameters or return types), schema markers change, config fields change, version number changes, installation instructions change, usage examples become incorrect.
+
+Do not update docs for purely internal refactors that don't affect architecture or public API.
