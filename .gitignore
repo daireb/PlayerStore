@@ -1,0 +1,12 @@
+# Roblox place files and lock files
+/*.rbxl
+/*.rbxlx
+/*.rbxl.lock
+/*.rbxlx.lock
+
+sourcemap.json
+
+# pesde
+.pesde/
+luau_packages/
+lune_packages/

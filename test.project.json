@@ -1,0 +1,44 @@
+{
+  "name": "PlayerStore",
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "Packages": {
+        "$className": "Folder",
+        "PlayerStore": {
+          "$path": "src"
+        }
+      },
+      "Tests": {
+        "$className": "Folder",
+        "Shared": {
+          "$path": "tests/shared"
+        }
+      }
+    },
+
+    "ServerScriptService": {
+      "ServerPackages": {
+        "$path": "roblox_server_packages"
+      },
+      "Tests": {
+        "$path": "tests/server"
+      }
+    },
+
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "Tests": {
+          "$path": "tests/client"
+        }
+      }
+    },
+
+    "Workspace": {
+      "$properties": {
+        "Gravity": 0
+      }
+    }
+  }
+}

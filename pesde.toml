@@ -1,0 +1,29 @@
+name = "daireb/playerstore"
+version = "0.1.0"
+description = "Schema-driven player data management for Roblox. Wraps ProfileStore with reactive ObservableTable access, automatic replication, migrations, and validation."
+authors = ["daireb"]
+license = "MIT"
+includes = ["src/**", "pesde.toml", "README.md", "ARCHITECTURE.md"]
+
+[target]
+environment = "roblox"
+lib = "src/init.luau"
+
+[indices]
+default = "https://github.com/pesde-pkg/index"
+
+[wally_indices]
+default = "https://github.com/UpliftGames/wally-index"
+
+[scripts]
+roblox_sync_config_generator = ".pesde/scripts/roblox_sync_config_generator.luau"
+sourcemap_generator = ".pesde/scripts/sourcemap_generator.luau"
+
+[dev_dependencies]
+scripts = { name = "pesde/scripts_rojo", version = "^0.2.0", target = "lune" }
+rojo = { name = "pesde/rojo", version = "^7.5.1", target = "lune" }
+ProfileStore = { wally = "lm-loleris/profilestore", version = "^1.0.3" }
+
+[engines]
+pesde = "^0.7.0"
+lune = "^0.10.2"
