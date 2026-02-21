@@ -93,9 +93,14 @@ local ServerStore = {}
 ServerStore.__index = ServerStore
 
 function ServerStore.new<T>(config: ServerStoreConfig<T>)
-	assert(config.profileStore ~= nil, "[PlayerStore] profileStore is required — pass in require(path.to.ProfileStore)")
-	assert(typeof(config.profileStore) == "table" and typeof(config.profileStore.New) == "function",
-		"[PlayerStore] profileStore must be a ProfileStore module with a .New() method")
+	assert(
+		config.profileStore ~= nil,
+		"[PlayerStore] profileStore is required — pass in require(path.to.ProfileStore)"
+	)
+	assert(
+		typeof(config.profileStore) == "table" and typeof(config.profileStore.New) == "function",
+		"[PlayerStore] profileStore must be a ProfileStore module with a .New() method"
+	)
 
 	local schema = config.schema
 	local migrations = config.migrations or {}
