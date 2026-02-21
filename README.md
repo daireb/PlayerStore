@@ -5,7 +5,7 @@ Schema-driven player data management for Roblox. Wraps [ProfileStore](https://ma
 ## Installation
 
 ```bash
-pesde add gh#daireb/PlayerStore#v0.1.2
+pesde add gh#daireb/PlayerStore#v0.1.4
 pesde install
 ```
 
