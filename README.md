@@ -208,6 +208,8 @@ end
 
 The client store is **read-only** -- data flows from server to client only.
 
+> ⚠️ Before `waitUntilLoaded()` resolves, `get()` and `bind()` return schema defaults. Call `waitUntilLoaded()` before reading data to ensure you have real values.
+
 ## Bridging to UI Frameworks
 
 PlayerStore is framework-agnostic. Bridge to your UI library with a small helper:

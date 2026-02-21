@@ -180,6 +180,17 @@ function ObservableTable.applyUpdate<T>(self: InternalObservableTable<T>, path: 
 			end
 		end
 		notify(self, ROOT, self._table, ROOT, self._table)
+
+		-- Notify any registered sub-path signals so listeners set up before
+		-- the initial load still fire with the real data.
+		for signalPath in self._signals do
+			if signalPath ~= ROOT then
+				local resolved = self:get(signalPath)
+				if resolved ~= nil then
+					notify(self, signalPath, resolved, ROOT, self._table)
+				end
+			end
+		end
 		return
 	end
 

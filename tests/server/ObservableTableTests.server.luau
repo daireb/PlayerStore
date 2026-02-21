@@ -248,6 +248,48 @@ t:test("applyUpdate root fires root listener", function()
 	t:expect(fired, "root listener fired")
 end)
 
+t:test("applyUpdate root fires sub-path listeners", function()
+	local obs = ObservableTable.wrap({ Resources = { Cash = 0, XP = 0 } })
+	local cashFired = false
+	local cashValue = nil
+	local resourcesFired = false
+
+	obs:listen("Resources/Cash", function(value)
+		cashFired = true
+		cashValue = value
+	end)
+
+	obs:listen("Resources", function()
+		resourcesFired = true
+	end)
+
+	obs:applyUpdate("", { Resources = { Cash = 500, XP = 10 } })
+	task.wait()
+
+	t:expect(cashFired, "Cash listener fired on root applyUpdate")
+	t:expectEqual(cashValue, 500, "Cash listener received correct value")
+	t:expect(resourcesFired, "Resources listener fired on root applyUpdate")
+end)
+
+t:test("bind before root applyUpdate fires twice with updated value", function()
+	local obs = ObservableTable.wrap({ Cash = 0 })
+	local values = {}
+
+	obs:bind("Cash", function(value)
+		table.insert(values, value)
+	end)
+
+	task.wait()
+	t:expectEqual(#values, 1, "bind fired once with default")
+	t:expectEqual(values[1], 0, "first fire has default value")
+
+	obs:applyUpdate("", { Cash = 999 })
+	task.wait()
+
+	t:expectEqual(#values, 2, "bind fired again after root applyUpdate")
+	t:expectEqual(values[2], 999, "second fire has real value")
+end)
+
 --------------------------------------------------------------------------------
 -- Destroy()
 --------------------------------------------------------------------------------

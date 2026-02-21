@@ -1,5 +1,5 @@
 name = "daireb/playerstore"
-version = "0.2.0"
+version = "0.1.4"
 description = "Schema-driven player data management for Roblox. Wraps ProfileStore with reactive ObservableTable access, automatic replication, migrations, and validation."
 authors = ["daireb"]
 license = "MIT"
