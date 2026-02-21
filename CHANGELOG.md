@@ -4,6 +4,13 @@ All notable changes to PlayerStore will be documented in this file.
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-02-21
+
+### Changed
+
+- `profileStore` config field now typed as `{ New: (storeId, template) -> any }` instead of `any`
+- Added runtime validation that `profileStore` is provided and has a `.New()` method
+
 ## [0.1.1] - 2026-02-21
 
 Fixed build config for the project.

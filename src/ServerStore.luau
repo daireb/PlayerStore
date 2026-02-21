@@ -23,10 +23,14 @@ type Schema<T> = {
 	privatePaths: { [string]: true },
 }
 
+type ProfileStoreModule = {
+	New: (storeId: string, template: { [string]: any }) -> any,
+}
+
 type ServerStoreConfig<T> = {
 	schema: Schema<T>,
 	storeId: string,
-	profileStore: any,
+	profileStore: ProfileStoreModule,
 	migrations: { (data: { [string]: any }) -> () }?,
 }
 
@@ -89,6 +93,10 @@ local ServerStore = {}
 ServerStore.__index = ServerStore
 
 function ServerStore.new<T>(config: ServerStoreConfig<T>)
+	assert(config.profileStore ~= nil, "[PlayerStore] profileStore is required — pass in require(path.to.ProfileStore)")
+	assert(typeof(config.profileStore) == "table" and typeof(config.profileStore.New) == "function",
+		"[PlayerStore] profileStore must be a ProfileStore module with a .New() method")
+
 	local schema = config.schema
 	local migrations = config.migrations or {}
 
