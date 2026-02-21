@@ -18,7 +18,7 @@ local Signal = require(script.Parent.Signal)
 type Callback = (value: any, path: string, specificValue: any, specificPath: string) -> ()
 
 export type ObservableTable<T> = {
-	get: ((self: ObservableTable<T>) -> T) & ((self: ObservableTable<T>, path: string) -> any),
+	get: (self: ObservableTable<T>, path: string?) -> any,
 	set: (self: ObservableTable<T>, path: string, value: any) -> (),
 	listen: ((self: ObservableTable<T>, callback: Callback) -> () -> ())
 		& ((self: ObservableTable<T>, path: string, callback: Callback) -> () -> ()),
@@ -47,7 +47,10 @@ local ROOT = ""
 local ObservableTable = {}
 ObservableTable.__index = ObservableTable
 
-function ObservableTable.wrap<T>(tbl: T, validator: ((path: string, value: any) -> (boolean, string?))?): ObservableTable<T>
+function ObservableTable.wrap<T>(
+	tbl: T,
+	validator: ((path: string, value: any) -> (boolean, string?))?
+): ObservableTable<T>
 	local self = setmetatable({}, ObservableTable) :: any
 	self._table = tbl or {}
 	self._signals = {}
@@ -55,7 +58,13 @@ function ObservableTable.wrap<T>(tbl: T, validator: ((path: string, value: any) 
 	return self
 end
 
-local function notify(self: InternalObservableTable<any>, path: string, value: any, specificPath: string, specificValue: any)
+local function notify(
+	self: InternalObservableTable<any>,
+	path: string,
+	value: any,
+	specificPath: string,
+	specificValue: any
+)
 	if self._signals[path] ~= nil then
 		self._signals[path]:Fire(value, path, specificValue, specificPath)
 	end
@@ -112,7 +121,11 @@ function ObservableTable.set<T>(self: InternalObservableTable<T>, path: string, 
 	notify(self, path, value, path, value)
 end
 
-function ObservableTable.listen<T>(self: InternalObservableTable<T>, pathOrCallback: string | Callback, maybeCallback: Callback?): () -> ()
+function ObservableTable.listen<T>(
+	self: InternalObservableTable<T>,
+	pathOrCallback: string | Callback,
+	maybeCallback: Callback?
+): () -> ()
 	local path: string
 	local callback: Callback
 
@@ -131,7 +144,11 @@ function ObservableTable.listen<T>(self: InternalObservableTable<T>, pathOrCallb
 	return self._signals[path]:Connect(callback)
 end
 
-function ObservableTable.bind<T>(self: InternalObservableTable<T>, pathOrCallback: string | Callback, maybeCallback: Callback?): () -> ()
+function ObservableTable.bind<T>(
+	self: InternalObservableTable<T>,
+	pathOrCallback: string | Callback,
+	maybeCallback: Callback?
+): () -> ()
 	local path: string
 	local callback: Callback
 
