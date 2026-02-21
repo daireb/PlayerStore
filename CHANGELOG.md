@@ -4,6 +4,13 @@ All notable changes to PlayerStore will be documented in this file.
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-02-21
+
+### Changed
+
+- Extracted `Validation.luau` from ServerStore into its own module
+- Added validation unit tests covering missing keys, type mismatches, map path skipping, and deep nesting
+
 ## [0.1.2] - 2026-02-21
 
 ### Changed

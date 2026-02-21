@@ -10,6 +10,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ObservableTable = require(script.Parent.ObservableTable)
+local validate = require(script.Parent.Validation)
 
 local DATA_VERSION_KEY = "_DataVersion"
 
@@ -33,57 +34,6 @@ type ServerStoreConfig<T> = {
 	profileStore: ProfileStoreModule,
 	migrations: { (data: { [string]: any }) -> () }?,
 }
-
---------------------------------------------------------------------------------
--- Validation
---------------------------------------------------------------------------------
-
---[=[
-	Recursively validates that all keys in template exist in data with
-	matching types. Allows extra keys in data. Skips deep validation
-	for paths in mapPaths.
-]=]
-local function validateDataStructure(
-	data: { [string]: any },
-	template: { [string]: any },
-	mapPaths: { [string]: true },
-	path: string?
-): (boolean, string?)
-	path = path or ""
-
-	for key, templateValue in template do
-		if key == DATA_VERSION_KEY then
-			continue
-		end
-
-		local dataValue = data[key]
-		local currentPath = if path == "" then key else `{path}/{key}`
-
-		if dataValue == nil then
-			return false, `Missing key: {currentPath}`
-		end
-
-		local templateType = typeof(templateValue)
-		local dataType = typeof(dataValue)
-
-		if templateType ~= dataType then
-			return false, `Type mismatch at {currentPath}: expected {templateType}, got {dataType}`
-		end
-
-		if templateType == "table" then
-			if mapPaths[currentPath] then
-				continue
-			end
-
-			local success, errorPath = validateDataStructure(dataValue, templateValue, mapPaths, currentPath)
-			if not success then
-				return false, errorPath
-			end
-		end
-	end
-
-	return true, nil
-end
 
 --------------------------------------------------------------------------------
 -- ServerStore class
@@ -164,7 +114,7 @@ function ServerStore._runMigrations(self: any, player: Player, profile: any): bo
 	end
 
 	-- Validate final structure
-	local valid, errorPath = validateDataStructure(data, self._schema.template :: any, self._schema.mapPaths)
+	local valid, errorPath = validate(data, self._schema.template :: any, self._schema.mapPaths)
 	if not valid then
 		warn(`[PlayerStore] Validation failed for {player.DisplayName}: {errorPath}`)
 		player:Kick(`Data validation failed: {errorPath}. Please contact support.`)
