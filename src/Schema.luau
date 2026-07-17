@@ -20,6 +20,26 @@ end
 -- Schema processing (internal)
 --------------------------------------------------------------------------------
 
+local function nestedPrivateError(path: string)
+	error(`[PlayerStore] private() must be used at the schema root; nested private path "{path}" is not supported`)
+end
+
+local function assertNoPrivateMarkers(definition: { [string]: any }, prefix: string)
+	for key, value in definition do
+		local path = `{prefix}/{key}`
+
+		if isMarker(value) then
+			if value.replicate == false then
+				nestedPrivateError(path)
+			elseif typeof(value.default) == "table" then
+				assertNoPrivateMarkers(value.default, path)
+			end
+		elseif typeof(value) == "table" then
+			assertNoPrivateMarkers(value, path)
+		end
+	end
+end
+
 --[=[
 	Recursively walks a schema definition and extracts:
 	  - template: plain table with markers resolved to defaults
@@ -43,7 +63,12 @@ local function processSchema(
 				mapPaths[path] = true
 			end
 			if value.replicate == false then
+				if prefix ~= "" then
+					nestedPrivateError(path)
+				end
 				privatePaths[path] = true
+			elseif typeof(value.default) == "table" then
+				assertNoPrivateMarkers(value.default, path)
 			end
 		elseif typeof(value) == "table" then
 			template[key] = {}

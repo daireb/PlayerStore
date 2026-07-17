@@ -93,6 +93,30 @@ t:test("private(map {}) composes correctly", function()
 	t:expectNotNil(s.template.Codes, "Codes exists in template")
 end)
 
+t:test("nested private() is rejected", function()
+	t:expectError(function()
+		schema {
+			PublicData = {
+				Secret = private {
+					Value = 1,
+				},
+			},
+		}
+	end, "nested private marker should error")
+end)
+
+t:test("private() inside a replicated map default is rejected", function()
+	t:expectError(function()
+		schema {
+			Inventory = map {
+				Starter = private {
+					Value = 1,
+				},
+			},
+		}
+	end, "private marker inside map default should error")
+end)
+
 t:test("schema template is frozen", function()
 	local s = schema {
 		Cash = 0,

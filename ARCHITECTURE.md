@@ -98,6 +98,8 @@ Processes consumer-defined schema definitions into three artifacts:
 - **mapPaths** -- Set of paths marked with `map()`. These skip deep structural validation since their keys are dynamic and can't be checked against a fixed template.
 - **privatePaths** -- Set of paths marked with `private()`. Excluded from client replication entirely.
 
+Private markers are restricted to schema-root fields. This makes replication filtering a constant path check without recursively cloning and redacting every replicated table. A top-level private field may itself contain an arbitrarily nested table because the entire subtree is excluded.
+
 #### Type-erasure trick
 
 `map()` and `private()` return marker objects at runtime but cast the return as `:: never`. Since `never` is assignable to any type in Luau, this lets the type checker see the consumer's annotation (e.g. `{ [string]: number }`) while the runtime value is actually a marker table.
