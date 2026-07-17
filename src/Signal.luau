@@ -6,6 +6,12 @@
 local Signal = {}
 Signal.__index = Signal
 
+export type Signal<T> = {
+	Fire: (self: Signal<T>, ...T) -> (),
+	Connect: (self: Signal<T>, callback: (...T) -> ()) -> () -> (),
+	Destroy: (self: Signal<T>) -> (),
+}
+
 function Signal.new()
 	return setmetatable({ _callbacks = {} }, Signal)
 end
