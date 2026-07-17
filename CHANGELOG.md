@@ -9,17 +9,21 @@ This project follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Atomic `ObservableTable:setMany()` writes with ordered updates, rollback on failure, coalesced listeners, and end-to-end batched client replication
+- Exported `Signal<T>` type
+
+### Changed
+
+- Nested `private()` markers are now rejected at schema creation, preventing private descendants from leaking when a public parent table is replicated
+- Fixed-structure table replacements now validate their complete subtree; validation paths also emit targeted MicroProfiler markers
+- Replacing a `map()` field now preserves its required table type while dynamic child values remain unrestricted
+- Observer dispatch now uses a path trie, avoiding global listener scans and repeated ancestor-path construction
 
 ### Fixed
 
 - Replacing a parent table now notifies registered descendant listeners, including when their resolved value becomes `nil`
-- Nested `private()` markers are now rejected at schema creation, preventing private descendants from leaking when a public parent table is replicated
 - Profiles already at the latest migration version are now structurally validated when loaded
 - Schema defaults are now cloned recursively for ProfileStore templates, client stores, and data wipes, preventing shared nested table references
 - Processed schema templates are now recursively frozen to prevent accidental nested default mutation
-- Fixed-structure table replacements now validate their complete subtree; validation paths also emit targeted MicroProfiler markers
-- Replacing a `map()` field now preserves its required table type while dynamic child values remain unrestricted
-- Observer dispatch now uses a path trie, avoiding global listener scans and repeated ancestor-path construction
 
 ## [0.1.4] - 2026-02-21
 
