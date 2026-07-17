@@ -175,6 +175,27 @@ t:test("migrations run on load", function()
 	store:unloadAsync(player)
 end)
 
+t:test("current-version profiles are still validated", function()
+	local store = createTestStore("validate_current")
+	local kicked = false
+	local fakePlayer = {
+		DisplayName = "ValidationTest",
+		Kick = function()
+			kicked = true
+		end,
+	}
+	local profile = {
+		Data = {
+			_DataVersion = 0,
+		},
+	}
+
+	local success = store:_runMigrations(fakePlayer, profile)
+
+	t:expect(not success, "invalid current-version profile rejected")
+	t:expect(kicked, "invalid profile triggered validation failure behavior")
+end)
+
 --------------------------------------------------------------------------------
 -- Replication RemoteEvent
 --------------------------------------------------------------------------------

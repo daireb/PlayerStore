@@ -171,8 +171,9 @@ The RemoteEvent is created by the library (named `__PlayerStore_{storeId}`) and 
 
 Migrations are an ordered list of functions provided by the consumer. The version is simply the list index. On load:
 
-- New players (version = -1): reconcile from template, set version to list length
-- Existing players: run all migrations from index `currentVersion + 1` to `#migrations`, then validate
+- New players (version = -1): reconcile from template and set version to list length
+- Existing players: run all migrations from index `currentVersion + 1` to `#migrations`
+- Every loaded profile is validated, including new and already-current profiles that required no migrations
 
 Validation recursively checks that all template keys exist in the data with matching types, skipping paths in `mapPaths`.
 

@@ -93,27 +93,22 @@ function ServerStore._runMigrations(self: any, player: Player, profile: any): bo
 	if data[DATA_VERSION_KEY] == -1 then
 		profile:Reconcile()
 		data[DATA_VERSION_KEY] = latestVersion
-		return true
-	end
+	else
+		local currentVersion: number = data[DATA_VERSION_KEY] or 0
 
-	local currentVersion: number = data[DATA_VERSION_KEY] or 0
+		for i = currentVersion + 1, latestVersion do
+			local success, err = pcall(self._migrations[i], data)
+			if not success then
+				warn(`[PlayerStore] Migration {i} failed for {player.DisplayName}: {err}`)
+				player:Kick(`Data migration failed at version {i}. Please rejoin or contact support.`)
+				return false
+			end
 
-	if currentVersion >= latestVersion then
-		return true
-	end
-
-	for i = currentVersion + 1, latestVersion do
-		local success, err = pcall(self._migrations[i], data)
-		if not success then
-			warn(`[PlayerStore] Migration {i} failed for {player.DisplayName}: {err}`)
-			player:Kick(`Data migration failed at version {i}. Please rejoin or contact support.`)
-			return false
+			data[DATA_VERSION_KEY] = i
 		end
-
-		data[DATA_VERSION_KEY] = i
 	end
 
-	-- Validate final structure
+	-- Validate every loaded profile, even when no migrations were needed
 	local valid, errorPath = Validation.validateData(data, self._schema.template :: any, self._schema.mapPaths)
 	if not valid then
 		warn(`[PlayerStore] Validation failed for {player.DisplayName}: {errorPath}`)
