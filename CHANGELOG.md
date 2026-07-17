@@ -19,6 +19,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 - Processed schema templates are now recursively frozen to prevent accidental nested default mutation
 - Fixed-structure table replacements now validate their complete subtree; validation paths also emit targeted MicroProfiler markers
 - Replacing a `map()` field now preserves its required table type while dynamic child values remain unrestricted
+- Observer dispatch now uses a path trie, avoiding global listener scans and repeated ancestor-path construction
 
 ## [0.1.4] - 2026-02-21
 

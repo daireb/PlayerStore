@@ -3,7 +3,8 @@
 
 	Wraps a table and provides path-based change notifications.
 	When a value is set, listeners at every ancestor path (including root)
-	are fired with both the ancestor's full value and the specific change.
+	and registered descendant path are fired with both the path's resolved
+	value and the specific change.
 
 	Path format: "Key1/Key2/Key3" using "/" as separator.
 	Omit the path argument to operate on the root.
@@ -22,6 +23,13 @@ export type Update = {
 
 type Callback = (value: any, path: string, specificValue: any, specificPath: string, updates: { Update }?) -> ()
 
+type ObserverNode = {
+	path: string,
+	keys: { string },
+	signal: Signal.Signal<unknown>,
+	children: { [string]: ObserverNode },
+}
+
 export type ObservableTable<T> = {
 	get: (self: ObservableTable<T>, path: string?) -> any,
 	set: (self: ObservableTable<T>, path: string, value: any) -> (),
@@ -37,7 +45,7 @@ export type ObservableTable<T> = {
 
 type InternalObservableTable<T> = ObservableTable<T> & {
 	_table: T & { [string]: any },
-	_signals: { [string]: typeof(Signal.new()) },
+	_observerRoot: ObserverNode,
 	_validator: ((path: string, value: any) -> (boolean, string?))?,
 }
 
@@ -60,39 +68,104 @@ function ObservableTable.wrap<T>(
 ): ObservableTable<T>
 	local self = setmetatable({}, ObservableTable) :: any
 	self._table = tbl or {}
-	self._signals = {}
+	self._observerRoot = {
+		path = ROOT,
+		keys = {},
+		signal = nil,
+		children = {},
+	}
 	self._validator = validator
 	return self
 end
 
-local function notify(
-	self: InternalObservableTable<any>,
-	path: string,
+local function notifyNode(
+	node: ObserverNode,
 	value: any,
 	specificPath: string,
 	specificValue: any,
 	updates: { Update }?
 )
-	if self._signals[path] ~= nil then
-		self._signals[path]:Fire(value, path, specificValue, specificPath, updates)
+	if node.signal ~= nil then
+		node.signal:Fire(value, node.path, specificValue, specificPath, updates)
 	end
 end
 
-local function isDescendantPath(path: string, ancestorPath: string): boolean
-	return string.sub(path, 1, #ancestorPath + 1) == `{ancestorPath}/`
+local function getOrCreateObserverNode(self: InternalObservableTable<any>, path: string): ObserverNode
+	local node = self._observerRoot
+	if path == ROOT then
+		return node
+	end
+
+	for _, key in string.split(path, "/") do
+		local child = node.children[key]
+		if child == nil then
+			local keys = table.clone(node.keys)
+			table.insert(keys, key)
+			child = {
+				path = if node.path == ROOT then key else `{node.path}/{key}`,
+				keys = keys,
+				signal = nil,
+				children = {},
+			}
+			node.children[key] = child
+		end
+		node = child
+	end
+
+	return node
 end
 
-local function notifyDescendants(
-	self: InternalObservableTable<any>,
-	path: string,
+local function resolveNodeValue(self: InternalObservableTable<any>, node: ObserverNode): any
+	local current: any = self._table
+	for _, key in node.keys do
+		if typeof(current) ~= "table" then
+			return nil
+		end
+		current = current[key]
+	end
+	return current
+end
+
+local function notifySubtree(
+	node: ObserverNode,
+	value: any,
 	specificPath: string,
 	specificValue: any,
 	updates: { Update }?
 )
-	for signalPath in self._signals do
-		if isDescendantPath(signalPath, path) then
-			notify(self, signalPath, self:get(signalPath), specificPath, specificValue, updates)
+	notifyNode(node, value, specificPath, specificValue, updates)
+
+	for key, child in node.children do
+		local childValue = if typeof(value) == "table" then value[key] else nil
+		notifySubtree(child, childValue, specificPath, specificValue, updates)
+	end
+end
+
+local function notifyPath(
+	self: InternalObservableTable<any>,
+	keys: { string },
+	specificPath: string,
+	specificValue: any,
+	updates: { Update }?
+)
+	local node = self._observerRoot
+	local value: any = self._table
+	notifyNode(node, value, specificPath, specificValue, updates)
+
+	for _, key in keys do
+		local child = node.children[key]
+		if child == nil then
+			return
 		end
+
+		node = child
+		value = if typeof(value) == "table" then value[key] else nil
+		notifyNode(node, value, specificPath, specificValue, updates)
+	end
+
+	for key, child in node.children do
+		local childValue = if typeof(value) == "table" then value[key] else nil
+		notifySubtree(child, childValue, specificPath, specificValue, updates)
 	end
 end
 
@@ -116,10 +189,10 @@ end
 local function resolveWriteTarget(
 	self: InternalObservableTable<any>,
 	path: string,
+	keys: { string },
 	createIntermediates: boolean,
 	undo: { any }
 ): (any, string)
-	local keys = string.split(path, "/")
 	local current: any = self._table
 
 	for i = 1, #keys - 1 do
@@ -149,52 +222,80 @@ local function resolveWriteTarget(
 	return current, keys[#keys]
 end
 
-local function notifyUpdates(self: InternalObservableTable<any>, updates: { Update })
-	local paths = {}
-	local seenPaths = {}
-	local lastUpdateByPath = {}
+local function addBatchNode(
+	nodes: { ObserverNode },
+	seenNodes: { [ObserverNode]: true },
+	lastUpdateByNode: { [ObserverNode]: Update },
+	node: ObserverNode,
+	update: Update
+)
+	if node.signal == nil then
+		return
+	end
+
+	if not seenNodes[node] then
+		seenNodes[node] = true
+		table.insert(nodes, node)
+	end
+	lastUpdateByNode[node] = update
+end
+
+local function addBatchSubtree(
+	nodes: { ObserverNode },
+	seenNodes: { [ObserverNode]: true },
+	lastUpdateByNode: { [ObserverNode]: Update },
+	node: ObserverNode,
+	update: Update
+)
+	for _, child in node.children do
+		addBatchNode(nodes, seenNodes, lastUpdateByNode, child, update)
+		addBatchSubtree(nodes, seenNodes, lastUpdateByNode, child, update)
+	end
+end
+
+local function notifyUpdates(
+	self: InternalObservableTable<any>,
+	updates: { Update },
+	keysByUpdate: { [Update]: { string } }
+)
+	local nodes = {}
+	local seenNodes = {}
+	local lastUpdateByNode = {}
 
 	for _, update in ipairs(updates) do
-		local keys = string.split(update.path, "/")
+		local node = self._observerRoot
+		addBatchNode(nodes, seenNodes, lastUpdateByNode, node, update)
 
-		if not seenPaths[ROOT] then
-			seenPaths[ROOT] = true
-			table.insert(paths, ROOT)
-		end
-		lastUpdateByPath[ROOT] = update
-
-		for i = 1, #keys do
-			local path = table.concat(keys, "/", 1, i)
-			if not seenPaths[path] then
-				seenPaths[path] = true
-				table.insert(paths, path)
+		for _, key in keysByUpdate[update] do
+			local child = node.children[key]
+			if child == nil then
+				node = nil :: any
+				break
 			end
-			lastUpdateByPath[path] = update
+
+			node = child
+			addBatchNode(nodes, seenNodes, lastUpdateByNode, node, update)
 		end
 
-		for signalPath in self._signals do
-			if isDescendantPath(signalPath, update.path) then
-				if not seenPaths[signalPath] then
-					seenPaths[signalPath] = true
-					table.insert(paths, signalPath)
-				end
-				lastUpdateByPath[signalPath] = update
-			end
+		if node ~= nil then
+			addBatchSubtree(nodes, seenNodes, lastUpdateByNode, node, update)
 		end
 	end
 
-	for _, path in paths do
-		local lastUpdate = lastUpdateByPath[path]
-		local value = self:get(if path == ROOT then nil else path)
-		notify(self, path, value, lastUpdate.path, lastUpdate.value, updates)
+	for _, node in nodes do
+		local lastUpdate = lastUpdateByNode[node]
+		notifyNode(node, resolveNodeValue(self, node), lastUpdate.path, lastUpdate.value, updates)
 	end
 end
 
 local function commitUpdates(self: InternalObservableTable<any>, updates: { Update }, createIntermediates: boolean)
 	local undo = {}
+	local keysByUpdate = {}
 	local success, err = pcall(function()
 		for _, update in ipairs(updates) do
-			local parent, key = resolveWriteTarget(self, update.path, createIntermediates, undo)
+			local keys = string.split(update.path, "/")
+			keysByUpdate[update] = keys
+			local parent, key = resolveWriteTarget(self, update.path, keys, createIntermediates, undo)
 			local oldValue = parent[key]
 			table.insert(undo, {
 				parent = parent,
@@ -214,7 +315,7 @@ local function commitUpdates(self: InternalObservableTable<any>, updates: { Upda
 		error(err, 0)
 	end
 
-	notifyUpdates(self, updates)
+	notifyUpdates(self, updates, keysByUpdate)
 end
 
 function ObservableTable.get<T>(self: InternalObservableTable<T>, path: string?): any
@@ -254,19 +355,7 @@ function ObservableTable.set<T>(self: InternalObservableTable<T>, path: string, 
 	end
 
 	current[keys[#keys]] = value
-
-	-- Notify: root, then each ancestor, then the exact path
-	notify(self, ROOT, self._table, path, value)
-
-	local ancestor: any = self._table
-	for i = 1, #keys - 1 do
-		local subPath = table.concat(keys, "/", 1, i)
-		notify(self, subPath, ancestor[keys[i]], path, value)
-		ancestor = ancestor[keys[i]]
-	end
-
-	notify(self, path, value, path, value)
-	notifyDescendants(self, path, path, value, nil)
+	notifyPath(self, keys, path, value, nil)
 end
 
 --[=[
@@ -305,11 +394,12 @@ function ObservableTable.listen<T>(
 		callback = maybeCallback :: Callback
 	end
 
-	if not self._signals[path] then
-		self._signals[path] = Signal.new()
+	local node = getOrCreateObserverNode(self, path)
+	if node.signal == nil then
+		node.signal = Signal.new()
 	end
 
-	return self._signals[path]:Connect(callback)
+	return node.signal:Connect(callback)
 end
 
 function ObservableTable.bind<T>(
@@ -347,16 +437,7 @@ function ObservableTable.applyUpdate<T>(self: InternalObservableTable<T>, path: 
 				(self._table :: any)[k] = v
 			end
 		end
-		notify(self, ROOT, self._table, ROOT, self._table)
-
-		-- Notify any registered sub-path signals so listeners set up before
-		-- the initial load still fire with the real data.
-		for signalPath in self._signals do
-			if signalPath ~= ROOT then
-				local resolved = self:get(signalPath)
-				notify(self, signalPath, resolved, ROOT, self._table)
-			end
-		end
+		notifySubtree(self._observerRoot, self._table, ROOT, self._table, nil)
 		return
 	end
 
@@ -371,19 +452,7 @@ function ObservableTable.applyUpdate<T>(self: InternalObservableTable<T>, path: 
 	end
 
 	current[keys[#keys]] = value
-
-	-- Fire the same notification hierarchy as set()
-	notify(self, ROOT, self._table, path, value)
-
-	local ancestor: any = self._table
-	for i = 1, #keys - 1 do
-		local subPath = table.concat(keys, "/", 1, i)
-		notify(self, subPath, ancestor[keys[i]], path, value)
-		ancestor = ancestor[keys[i]]
-	end
-
-	notify(self, path, value, path, value)
-	notifyDescendants(self, path, path, value, nil)
+	notifyPath(self, keys, path, value, nil)
 end
 
 --[=[
@@ -394,14 +463,22 @@ function ObservableTable.applyUpdates<T>(self: InternalObservableTable<T>, updat
 	commitUpdates(self, copyUpdates(updates), true)
 end
 
-function ObservableTable.Destroy<T>(self: InternalObservableTable<T>)
-	for path, signal in self._signals do
-		signal:Destroy()
-		self._signals[path] = nil
+local function destroyObserverNode(node: ObserverNode)
+	if node.signal ~= nil then
+		node.signal:Destroy()
+		node.signal = nil :: any
 	end
 
+	for _, child in node.children do
+		destroyObserverNode(child)
+	end
+	table.clear(node.children)
+end
+
+function ObservableTable.Destroy<T>(self: InternalObservableTable<T>)
+	destroyObserverNode(self._observerRoot)
 	self._table = nil :: any
-	self._signals = nil :: any
+	self._observerRoot = nil :: any
 	setmetatable(self :: any, nil)
 end
 

@@ -336,6 +336,26 @@ t:test("disconnect function stops listener", function()
 	t:expectEqual(fireCount, 1, "did not fire after disconnect")
 end)
 
+t:test("listener paths share observer trie ancestors", function()
+	local obs = ObservableTable.wrap({
+		Items = {
+			gold = 0,
+			gems = 0,
+		},
+	})
+
+	obs:listen("Items/gold", function() end)
+	obs:listen("Items/gems", function() end)
+
+	local observerRoot = (obs :: any)._observerRoot
+	local itemsNode = observerRoot.children.Items
+
+	t:expectNotNil(itemsNode, "shared Items node exists")
+	t:expectNotNil(itemsNode.children.gold.signal, "gold signal stored under Items")
+	t:expectNotNil(itemsNode.children.gems.signal, "gems signal stored under Items")
+	t:expectEqual(itemsNode.children.gold.path, "Items/gold", "full path cached on node")
+end)
+
 --------------------------------------------------------------------------------
 -- bind()
 --------------------------------------------------------------------------------
