@@ -6,6 +6,8 @@
 	types flow through cleanly.
 ]=]
 
+local deepClone = require(script.Parent.DeepClone)
+
 local MARKER_KEY = "__playerstore"
 
 --------------------------------------------------------------------------------
@@ -22,6 +24,16 @@ end
 
 local function nestedPrivateError(path: string)
 	error(`[PlayerStore] private() must be used at the schema root; nested private path "{path}" is not supported`)
+end
+
+local function deepFreeze(tbl: { [any]: any }): { [any]: any }
+	for _, value in tbl do
+		if typeof(value) == "table" and not table.isfrozen(value) then
+			deepFreeze(value)
+		end
+	end
+
+	return table.freeze(tbl)
 end
 
 local function assertNoPrivateMarkers(definition: { [string]: any }, prefix: string)
@@ -57,7 +69,7 @@ local function processSchema(
 		local path = if prefix == "" then key else `{prefix}/{key}`
 
 		if isMarker(value) then
-			template[key] = value.default
+			template[key] = deepClone(value.default)
 
 			if value.kind == "map" then
 				mapPaths[path] = true
@@ -113,7 +125,7 @@ function Schema.schema<T>(definition: T): Schema<T>
 	processSchema(definition :: any, template, mapPaths, privatePaths, "")
 
 	local schema: Schema<T> = {
-		template = table.freeze(template) :: any,
+		template = deepFreeze(template) :: any,
 		mapPaths = table.freeze(mapPaths),
 		privatePaths = table.freeze(privatePaths),
 	}

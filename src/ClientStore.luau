@@ -8,6 +8,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local deepClone = require(script.Parent.DeepClone)
 local ObservableTable = require(script.Parent.ObservableTable)
 
 --------------------------------------------------------------------------------
@@ -52,7 +53,7 @@ function ClientStore.new<T>(config: ClientStoreConfig<T>)
 	local clientTemplate = {}
 	for key, value in schema.template :: any do
 		if not schema.privatePaths[key] then
-			clientTemplate[key] = if typeof(value) == "table" then table.clone(value) else value
+			clientTemplate[key] = deepClone(value)
 		end
 	end
 

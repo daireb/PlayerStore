@@ -15,6 +15,8 @@ This project follows [Semantic Versioning](https://semver.org/).
 - Replacing a parent table now notifies registered descendant listeners, including when their resolved value becomes `nil`
 - Nested `private()` markers are now rejected at schema creation, preventing private descendants from leaking when a public parent table is replicated
 - Profiles already at the latest migration version are now structurally validated when loaded
+- Schema defaults are now cloned recursively for ProfileStore templates, client stores, and data wipes, preventing shared nested table references
+- Processed schema templates are now recursively frozen to prevent accidental nested default mutation
 
 ## [0.1.4] - 2026-02-21
 

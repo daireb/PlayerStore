@@ -9,6 +9,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local deepClone = require(script.Parent.DeepClone)
 local ObservableTable = require(script.Parent.ObservableTable)
 local Validation = require(script.Parent.Validation)
 
@@ -56,7 +57,7 @@ function ServerStore.new<T>(config: ServerStoreConfig<T>)
 	local migrations = config.migrations or {}
 
 	-- Inject _DataVersion into template for ProfileStore
-	local templateWithVersion = table.clone(schema.template :: any)
+	local templateWithVersion = deepClone(schema.template :: any)
 	templateWithVersion[DATA_VERSION_KEY] = -1
 
 	local playerStore = config.profileStore.New(config.storeId, templateWithVersion)
@@ -288,7 +289,7 @@ function ServerStore.wipeData(self: any, player: Player)
 
 	local template = self._schema.template :: any
 	for key, value in template do
-		profile.Data[key] = if typeof(value) == "table" then table.clone(value) else value
+		profile.Data[key] = deepClone(value)
 	end
 
 	player:Kick("Your data has been wiped. Please rejoin.")

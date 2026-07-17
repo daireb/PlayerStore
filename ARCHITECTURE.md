@@ -20,6 +20,7 @@ flowchart TD
         OT["ObservableTable.luau"]
         Val["Validation.luau"]
         Sig["Signal.luau"]
+        DC["DeepClone.luau"]
     end
 
     subgraph external [External]
@@ -36,6 +37,9 @@ flowchart TD
     ServerStore --> OT
     ServerStore --> Val
     ClientStoreModule --> OT
+    ServerStore --> DC
+    ClientStoreModule --> DC
+    SchemaModule --> DC
     OT --> Sig
     ServerStore --> SchemaModule
     ClientStoreModule --> SchemaModule
@@ -90,11 +94,15 @@ sequenceDiagram
 
 Minimal signal (~20 lines). `Connect` returns a disconnect function (no Connection object). Used internally by ObservableTable -- not exposed to consumers.
 
+### DeepClone.luau
+
+Recursively clones plain data tables. Used when constructing schema, ProfileStore, and client templates and when wiping data, preventing nested defaults from sharing mutable table references. It does not run on normal reads, writes, or replication.
+
 ### Schema.luau
 
 Processes consumer-defined schema definitions into three artifacts:
 
-- **template** -- Plain Luau table with all markers resolved to their default values. Used by ProfileStore as the data template and by the validation system as the structural reference.
+- **template** -- Recursively frozen Luau table with all markers resolved to isolated default clones. Used by ProfileStore as the data template and by the validation system as the structural reference.
 - **mapPaths** -- Set of paths marked with `map()`. These skip deep structural validation since their keys are dynamic and can't be checked against a fixed template.
 - **privatePaths** -- Set of paths marked with `private()`. Excluded from client replication entirely.
 

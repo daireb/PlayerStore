@@ -130,6 +130,8 @@ Parentheses are only needed when composing markers: `private(map {})`.
 
 `private()` fields must be declared at the schema root. A top-level private table can contain any nested server-only structure. Nested private markers inside otherwise replicated tables are rejected when the schema is created.
 
+The processed schema template is recursively frozen. Treat schema defaults as immutable configuration; PlayerStore deep-clones them before creating mutable profile or client data.
+
 > Note: If using stylua, add `call_parentheses = "Input"` to the top of your stylua.toml file to allow this syntax.
 
 ## Server API

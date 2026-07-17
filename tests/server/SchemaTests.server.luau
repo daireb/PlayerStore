@@ -127,6 +127,39 @@ t:test("schema template is frozen", function()
 	end, "template should be frozen")
 end)
 
+t:test("schema template is recursively frozen", function()
+	local s = schema {
+		Stats = {
+			Daily = {
+				Wins = 0,
+			},
+		},
+	}
+
+	t:expect(table.isfrozen(s.template.Stats), "nested table is frozen")
+	t:expect(table.isfrozen(s.template.Stats.Daily), "deep table is frozen")
+	t:expectError(function()
+		(s.template.Stats.Daily :: any).Wins = 10
+	end, "deep template mutation should error")
+end)
+
+t:test("freezing marker defaults does not freeze caller tables", function()
+	local settingsDefault = {
+		Nested = {
+			Value = 1,
+		},
+	}
+	local s = schema {
+		Settings = private(settingsDefault),
+	}
+
+	settingsDefault.Nested.Value = 2
+
+	t:expect(not table.isfrozen(settingsDefault), "caller root table remains mutable")
+	t:expect(not table.isfrozen(settingsDefault.Nested), "caller nested table remains mutable")
+	t:expectEqual(s.template.Settings.Nested.Value, 1, "schema owns an isolated default clone")
+end)
+
 t:test("nested paths are tracked correctly", function()
 	local s = schema {
 		Player = {
