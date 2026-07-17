@@ -10,6 +10,10 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 - Atomic `ObservableTable:setMany()` writes with ordered updates, rollback on failure, coalesced listeners, and end-to-end batched client replication
 
+### Fixed
+
+- Replacing a parent table now notifies registered descendant listeners, including when their resolved value becomes `nil`
+
 ## [0.1.4] - 2026-02-21
 
 ### Added

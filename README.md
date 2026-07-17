@@ -235,6 +235,8 @@ end
 | `waitUntilLoaded()` | | Yields until initial data received |
 | `isLoaded()` | `boolean` | Whether initial data has been received |
 
+Listeners are hierarchical. A listener fires when its exact path changes, when a descendant changes, or when an ancestor table is replaced. If an ancestor replacement removes the listened-to value, the callback receives `nil`.
+
 The client store is **read-only** -- data flows from server to client only.
 
 > ⚠️ Before `waitUntilLoaded()` resolves, `get()` and `bind()` return schema defaults. Call `waitUntilLoaded()` before reading data to ensure you have real values.

@@ -122,6 +122,8 @@ When `set("Resources/Cash", 100)` is called:
 
 This allows a root listener to see all changes (used for replication), a mid-level listener to react to any change in a sub-tree, and a leaf listener to track a single value.
 
+When an entire parent path is replaced, registered descendant signals also fire with their newly resolved values. This includes `nil` when a key disappears: replacing `"Items"` without `gold` notifies a listener on `"Items/gold"`.
+
 #### Atomic batches
 
 `setMany(updates)` accepts an ordered list of path/value records. It validates every update before mutation, applies writes in order without notifying, and rolls back in reverse if a path cannot be applied. After a successful commit, each affected root, ancestor, and leaf signal fires once with final state. The usual specific path/value arguments describe the last relevant write, while an optional fifth callback argument contains the full batch.

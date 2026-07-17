@@ -73,6 +73,31 @@ t:test("set() errors on invalid path", function()
 	end, "should error on invalid path")
 end)
 
+t:test("set() parent replacement notifies removed descendant", function()
+	local obs = ObservableTable.wrap({
+		Items = {
+			gold = 100,
+			gems = 10,
+		},
+	})
+	local fired = false
+	local receivedValue = 100
+	local receivedSpecificPath = nil
+
+	obs:listen("Items/gold", function(value, _path, _specificValue, specificPath)
+		fired = true
+		receivedValue = value
+		receivedSpecificPath = specificPath
+	end)
+
+	obs:set("Items", { gems = 20 })
+	task.wait()
+
+	t:expect(fired, "removed descendant listener fired")
+	t:expectNil(receivedValue, "removed descendant received nil")
+	t:expectEqual(receivedSpecificPath, "Items", "parent replacement reported as specific change")
+end)
+
 --------------------------------------------------------------------------------
 -- setMany()
 --------------------------------------------------------------------------------
@@ -187,6 +212,31 @@ t:test("setMany() notifies affected paths once with final state", function()
 	t:expect(sawFinalState, "listener observed all final values")
 	t:expectEqual(lastSpecificPath, "Resources/XP", "last relevant write provided")
 	t:expectEqual(batchSize, 3, "full batch metadata provided")
+end)
+
+t:test("setMany() parent replacement notifies descendant once", function()
+	local obs = ObservableTable.wrap({
+		Items = {
+			gold = 100,
+			gems = 10,
+		},
+	})
+	local fireCount = 0
+	local receivedValue = 100
+
+	obs:listen("Items/gold", function(value)
+		fireCount += 1
+		receivedValue = value
+	end)
+
+	obs:setMany({
+		{ path = "Items", value = { gems = 20 } },
+		{ path = "Items/gems", value = 30 },
+	})
+	task.wait()
+
+	t:expectEqual(fireCount, 1, "removed descendant listener fired once")
+	t:expectNil(receivedValue, "removed descendant received final nil value")
 end)
 
 --------------------------------------------------------------------------------
@@ -350,6 +400,28 @@ t:test("applyUpdate fires listeners", function()
 	t:expect(fired, "listener fired on applyUpdate")
 end)
 
+t:test("applyUpdate parent replacement notifies removed descendant", function()
+	local obs = ObservableTable.wrap({
+		Items = {
+			gold = 100,
+			gems = 10,
+		},
+	})
+	local fired = false
+	local receivedValue = 100
+
+	obs:listen("Items/gold", function(value)
+		fired = true
+		receivedValue = value
+	end)
+
+	obs:applyUpdate("Items", { gems = 20 })
+	task.wait()
+
+	t:expect(fired, "replicated descendant listener fired")
+	t:expectNil(receivedValue, "replicated descendant received nil")
+end)
+
 t:test("applyUpdate root fires root listener", function()
 	local obs = ObservableTable.wrap({ Cash = 0 })
 	local fired = false
@@ -385,6 +457,28 @@ t:test("applyUpdate root fires sub-path listeners", function()
 	t:expect(cashFired, "Cash listener fired on root applyUpdate")
 	t:expectEqual(cashValue, 500, "Cash listener received correct value")
 	t:expect(resourcesFired, "Resources listener fired on root applyUpdate")
+end)
+
+t:test("applyUpdate root notifies removed descendant with nil", function()
+	local obs = ObservableTable.wrap({
+		Items = {
+			gold = 100,
+			gems = 10,
+		},
+	})
+	local fired = false
+	local receivedValue = 100
+
+	obs:listen("Items/gold", function(value)
+		fired = true
+		receivedValue = value
+	end)
+
+	obs:applyUpdate("", { Items = { gems = 20 } })
+	task.wait()
+
+	t:expect(fired, "removed root descendant listener fired")
+	t:expectNil(receivedValue, "removed root descendant received nil")
 end)
 
 t:test("applyUpdates creates intermediates and notifies after all writes", function()

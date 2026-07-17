@@ -78,6 +78,24 @@ local function notify(
 	end
 end
 
+local function isDescendantPath(path: string, ancestorPath: string): boolean
+	return string.sub(path, 1, #ancestorPath + 1) == `{ancestorPath}/`
+end
+
+local function notifyDescendants(
+	self: InternalObservableTable<any>,
+	path: string,
+	specificPath: string,
+	specificValue: any,
+	updates: { Update }?
+)
+	for signalPath in self._signals do
+		if isDescendantPath(signalPath, path) then
+			notify(self, signalPath, self:get(signalPath), specificPath, specificValue, updates)
+		end
+	end
+end
+
 local function copyUpdates(updates: { Update }): { Update }
 	local copied = {}
 
@@ -152,6 +170,16 @@ local function notifyUpdates(self: InternalObservableTable<any>, updates: { Upda
 				table.insert(paths, path)
 			end
 			lastUpdateByPath[path] = update
+		end
+
+		for signalPath in self._signals do
+			if isDescendantPath(signalPath, update.path) then
+				if not seenPaths[signalPath] then
+					seenPaths[signalPath] = true
+					table.insert(paths, signalPath)
+				end
+				lastUpdateByPath[signalPath] = update
+			end
 		end
 	end
 
@@ -238,6 +266,7 @@ function ObservableTable.set<T>(self: InternalObservableTable<T>, path: string, 
 	end
 
 	notify(self, path, value, path, value)
+	notifyDescendants(self, path, path, value, nil)
 end
 
 --[=[
@@ -325,9 +354,7 @@ function ObservableTable.applyUpdate<T>(self: InternalObservableTable<T>, path: 
 		for signalPath in self._signals do
 			if signalPath ~= ROOT then
 				local resolved = self:get(signalPath)
-				if resolved ~= nil then
-					notify(self, signalPath, resolved, ROOT, self._table)
-				end
+				notify(self, signalPath, resolved, ROOT, self._table)
 			end
 		end
 		return
@@ -356,6 +383,7 @@ function ObservableTable.applyUpdate<T>(self: InternalObservableTable<T>, path: 
 	end
 
 	notify(self, path, value, path, value)
+	notifyDescendants(self, path, path, value, nil)
 end
 
 --[=[
