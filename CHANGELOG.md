@@ -4,6 +4,12 @@ All notable changes to PlayerStore will be documented in this file.
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-07-17
+
+### Added
+
+- Atomic `ObservableTable:setMany()` writes with ordered updates, rollback on failure, coalesced listeners, and end-to-end batched client replication
+
 ## [0.1.4] - 2026-02-21
 
 ### Added

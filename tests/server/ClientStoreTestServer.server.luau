@@ -35,6 +35,11 @@ signalRemote.OnServerEvent:Connect(function(player, action: string, value: any)
 		obs:set("Resources/Cash", value)
 	elseif action == "setXP" then
 		obs:set("Resources/XP", value)
+	elseif action == "setResources" then
+		obs:setMany({
+			{ path = "Resources/Cash", value = value.cash },
+			{ path = "Resources/XP", value = value.xp },
+		})
 	end
 end)
 

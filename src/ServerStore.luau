@@ -196,8 +196,22 @@ function ServerStore.loadAsync(self: any, player: Player): boolean
 	end)
 	self._observables[player] = observable
 
-	observable:bind(function(_value, _path, specificValue, specificPath)
-		if specificPath == "" then
+	observable:bind(function(_value, _path, specificValue, specificPath, updates)
+		if updates ~= nil then
+			local publicUpdates = {}
+			for _, update in ipairs(updates) do
+				if not self:_isPrivatePath(update.path) then
+					table.insert(publicUpdates, {
+						path = update.path,
+						value = update.value,
+					})
+				end
+			end
+
+			if #publicUpdates > 0 then
+				self._remoteEvent:FireClient(player, publicUpdates)
+			end
+		elseif specificPath == "" then
 			-- Root bind (initial): send all non-private top-level keys
 			local filteredData = {}
 			for key, val in profile.Data do

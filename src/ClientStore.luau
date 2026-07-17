@@ -14,7 +14,8 @@ local ObservableTable = require(script.Parent.ObservableTable)
 -- Types
 --------------------------------------------------------------------------------
 
-type Callback = (value: any, path: string, specificValue: any, specificPath: string) -> ()
+type Update = ObservableTable.Update
+type Callback = (value: any, path: string, specificValue: any, specificPath: string, updates: { Update }?) -> ()
 
 type Schema<T> = {
 	template: T,
@@ -67,7 +68,13 @@ function ClientStore.new<T>(config: ClientStoreConfig<T>)
 
 	-- Connect to server replication
 	local remoteEvent = ReplicatedStorage:WaitForChild(`__PlayerStore_{config.storeId}`)
-	remoteEvent.OnClientEvent:Connect(function(path: string, data: any)
+	remoteEvent.OnClientEvent:Connect(function(pathOrUpdates: string | { Update }, data: any)
+		if typeof(pathOrUpdates) == "table" then
+			observable:applyUpdates(pathOrUpdates)
+			return
+		end
+
+		local path = pathOrUpdates :: string
 		observable:applyUpdate(path, data)
 
 		if not self._loaded and path == "" then

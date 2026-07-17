@@ -155,6 +155,46 @@ t:test("observable set on private path does not replicate", function()
 	t:expectEqual(replicated[1].value, 50, "correct value")
 end)
 
+t:test("observable batch is filtered and emitted once", function()
+	local s = schema {
+		Cash = 0,
+		XP = 0,
+		Settings = private {
+			Volume = 0.75,
+		},
+	}
+
+	local data = { Cash = 0, XP = 0, Settings = { Volume = 0.75 } }
+	local obs = ObservableTable.wrap(data)
+	local replicatedBatches = {}
+
+	obs:listen(function(_value, _path, _specificValue, _specificPath, updates)
+		if updates == nil then
+			return
+		end
+
+		local publicUpdates = {}
+		for _, update in ipairs(updates) do
+			if not isPrivatePath(s.privatePaths, update.path) then
+				table.insert(publicUpdates, update)
+			end
+		end
+		table.insert(replicatedBatches, publicUpdates)
+	end)
+
+	obs:setMany({
+		{ path = "Cash", value = 100 },
+		{ path = "Settings/Volume", value = 0.5 },
+		{ path = "XP", value = 50 },
+	})
+	task.wait()
+
+	t:expectEqual(#replicatedBatches, 1, "one batch emitted")
+	t:expectEqual(#replicatedBatches[1], 2, "private update removed")
+	t:expectEqual(replicatedBatches[1][1].path, "Cash", "first public update preserved")
+	t:expectEqual(replicatedBatches[1][2].path, "XP", "second public update preserved")
+end)
+
 t:test("map paths replicate table values correctly", function()
 	local s = schema {
 		Inventory = map {} :: { [string]: number },

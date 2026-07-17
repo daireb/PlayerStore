@@ -74,6 +74,122 @@ t:test("set() errors on invalid path", function()
 end)
 
 --------------------------------------------------------------------------------
+-- setMany()
+--------------------------------------------------------------------------------
+
+t:test("setMany() applies ordered writes", function()
+	local data = { Resources = { Cash = 100, XP = 0 }, Inventory = {} }
+	local obs = ObservableTable.wrap(data)
+
+	obs:setMany({
+		{ path = "Resources/Cash", value = 25 },
+		{ path = "Resources/XP", value = 50 },
+		{ path = "Inventory/Sword", value = {} },
+		{ path = "Inventory/Sword/Level", value = 2 },
+	})
+
+	t:expectEqual(data.Resources.Cash, 25, "Cash updated")
+	t:expectEqual(data.Resources.XP, 50, "XP updated")
+	t:expectEqual(data.Inventory.Sword.Level, 2, "later write sees earlier parent write")
+end)
+
+t:test("setMany() supports nil deletion", function()
+	local data = { Inventory = { Sword = 1, Shield = 1 } }
+	local obs = ObservableTable.wrap(data)
+
+	obs:setMany({
+		{ path = "Inventory/Sword", value = nil },
+		{ path = "Inventory/Shield", value = 2 },
+	})
+
+	t:expectNil(data.Inventory.Sword, "Sword deleted")
+	t:expectEqual(data.Inventory.Shield, 2, "Shield updated")
+end)
+
+t:test("setMany() validates every write before mutation", function()
+	local data = { Cash = 0, XP = 0 }
+	local obs = ObservableTable.wrap(data, function(path, value)
+		if typeof(value) ~= "number" then
+			return false, `{path} must be a number`
+		end
+		return true, nil
+	end)
+
+	t:expectError(function()
+		obs:setMany({
+			{ path = "Cash", value = 100 },
+			{ path = "XP", value = "invalid" },
+		})
+	end, "invalid batch should error")
+
+	t:expectEqual(data.Cash, 0, "valid earlier write was not applied")
+	t:expectEqual(data.XP, 0, "invalid write was not applied")
+end)
+
+t:test("setMany() rolls back on path failure", function()
+	local data = { Resources = { Cash = 0 } }
+	local obs = ObservableTable.wrap(data)
+
+	t:expectError(function()
+		obs:setMany({
+			{ path = "Resources/Cash", value = 100 },
+			{ path = "Missing/Deep", value = 1 },
+		})
+	end, "invalid path should error")
+
+	t:expectEqual(data.Resources.Cash, 0, "earlier write rolled back")
+	t:expectNil(data.Missing, "invalid path did not create data")
+end)
+
+t:test("setMany() notifies affected paths once with final state", function()
+	local data = { Resources = { Cash = 0, XP = 0 }, Name = "Player" }
+	local obs = ObservableTable.wrap(data)
+	local rootCount = 0
+	local resourcesCount = 0
+	local cashCount = 0
+	local xpCount = 0
+	local nameCount = 0
+	local sawFinalState = false
+	local lastSpecificPath = nil
+	local batchSize = nil
+
+	obs:listen(function(value, _path, _specificValue, specificPath, updates)
+		rootCount += 1
+		sawFinalState = value.Resources.Cash == 100 and value.Resources.XP == 50
+		lastSpecificPath = specificPath
+		batchSize = if updates then #updates else nil
+	end)
+	obs:listen("Resources", function()
+		resourcesCount += 1
+	end)
+	obs:listen("Resources/Cash", function()
+		cashCount += 1
+	end)
+	obs:listen("Resources/XP", function()
+		xpCount += 1
+	end)
+	obs:listen("Name", function()
+		nameCount += 1
+	end)
+
+	obs:setMany({
+		{ path = "Resources/Cash", value = 100 },
+		{ path = "Resources/XP", value = 25 },
+		{ path = "Resources/XP", value = 50 },
+	})
+	task.wait()
+
+	t:expectEqual(rootCount, 1, "root listener fired once")
+	t:expectEqual(resourcesCount, 1, "ancestor listener fired once")
+	t:expectEqual(cashCount, 1, "Cash listener fired once")
+	t:expectEqual(xpCount, 1, "duplicate XP writes coalesced")
+	t:expectEqual(nameCount, 0, "unaffected listener did not fire")
+	t:expect(sawFinalState, "listener observed all final values")
+	t:expectEqual(lastSpecificPath, "Resources/XP", "last relevant write provided")
+	t:expectEqual(batchSize, 3, "full batch metadata provided")
+end)
+
+--------------------------------------------------------------------------------
 -- listen()
 --------------------------------------------------------------------------------
 
@@ -269,6 +385,40 @@ t:test("applyUpdate root fires sub-path listeners", function()
 	t:expect(cashFired, "Cash listener fired on root applyUpdate")
 	t:expectEqual(cashValue, 500, "Cash listener received correct value")
 	t:expect(resourcesFired, "Resources listener fired on root applyUpdate")
+end)
+
+t:test("applyUpdates creates intermediates and notifies after all writes", function()
+	local obs = ObservableTable.wrap({})
+	local receivedCash = nil
+	local receivedXP = nil
+
+	obs:listen("Resources/Cash", function(value)
+		receivedCash = value
+		receivedXP = obs:get("Resources/XP")
+	end)
+
+	obs:applyUpdates({
+		{ path = "Resources/Cash", value = 100 },
+		{ path = "Resources/XP", value = 50 },
+	})
+	task.wait()
+
+	t:expectEqual(receivedCash, 100, "Cash listener received final value")
+	t:expectEqual(receivedXP, 50, "Cash listener saw final XP value")
+end)
+
+t:test("applyUpdates rolls back created intermediates on failure", function()
+	local data = {}
+	local obs = ObservableTable.wrap(data)
+
+	t:expectError(function()
+		obs:applyUpdates({
+			{ path = "Inventory/Sword", value = 1 },
+			{ path = "Inventory/Sword/Level", value = 2 },
+		})
+	end, "invalid ordered update should error")
+
+	t:expectNil(data.Inventory, "created intermediates rolled back")
 end)
 
 t:test("bind before root applyUpdate fires twice with updated value", function()

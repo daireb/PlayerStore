@@ -105,6 +105,43 @@ t:test("listen fires when server changes data", function()
 	disconnect()
 end)
 
+t:test("setMany replication is observed atomically", function()
+	clientStore:waitUntilLoaded()
+
+	local cashValue = nil
+	local xpSeenByCashListener = nil
+	local rootFireCount = 0
+	local disconnectCash = clientStore:listen("Resources/Cash", function(value)
+		cashValue = value
+		xpSeenByCashListener = clientStore:get("Resources/XP")
+	end)
+	local disconnectRoot = clientStore:listen(function()
+		rootFireCount += 1
+	end)
+
+	local signalRemote = ReplicatedStorage:WaitForChild("__PlayerStoreTestSignal", 5)
+	if signalRemote then
+		signalRemote:FireServer("setResources", {
+			cash = 24680,
+			xp = 13579,
+		})
+
+		local startTime = tick()
+		while (cashValue == nil or rootFireCount == 0) and tick() - startTime < 5 do
+			task.wait(0.1)
+		end
+
+		t:expectEqual(cashValue, 24680, "Cash received from batch")
+		t:expectEqual(xpSeenByCashListener, 13579, "listener saw final XP from same batch")
+		t:expectEqual(rootFireCount, 1, "root listener fired once for batch")
+	else
+		t:expect(true, "skipped: server signal remote not found")
+	end
+
+	disconnectCash()
+	disconnectRoot()
+end)
+
 t:test("bind fires immediately with current value", function()
 	clientStore:waitUntilLoaded()
 

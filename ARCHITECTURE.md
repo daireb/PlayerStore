@@ -75,6 +75,13 @@ sequenceDiagram
     SS->>RE: FireClient(player, "Resources/Cash", 100)
     RE->>COT: applyUpdate("Resources/Cash", 100)
     COT->>CB: Listeners at "", "Resources", "Resources/Cash" all fire
+
+    Note over SS,CB: Atomic batch
+    SOT->>SOT: setMany(updates) validates and applies all writes
+    SOT->>SS: Root listener fires once with batch metadata
+    SS->>RE: FireClient(player, filteredUpdates)
+    RE->>COT: applyUpdates(filteredUpdates)
+    COT->>CB: Affected listeners fire once with final state
 ```
 
 ## Module Descriptions
@@ -115,6 +122,12 @@ When `set("Resources/Cash", 100)` is called:
 
 This allows a root listener to see all changes (used for replication), a mid-level listener to react to any change in a sub-tree, and a leaf listener to track a single value.
 
+#### Atomic batches
+
+`setMany(updates)` accepts an ordered list of path/value records. It validates every update before mutation, applies writes in order without notifying, and rolls back in reverse if a path cannot be applied. After a successful commit, each affected root, ancestor, and leaf signal fires once with final state. The usual specific path/value arguments describe the last relevant write, while an optional fifth callback argument contains the full batch.
+
+The ordered representation supports duplicate paths, parent-before-child writes, and `nil` values for deleting dynamic map entries.
+
 #### Optional path argument
 
 `get()`, `listen()`, and `bind()` accept an optional path. When omitted, they operate on the root. The type signature uses intersection types to prevent `(function, function)` from matching:
@@ -125,11 +138,11 @@ listen: ((self, Callback) -> () -> ()) & ((self, string, Callback) -> () -> ())
 
 #### Optional validator
 
-`wrap(tbl, validator?)` accepts an optional `(path, value) -> (boolean, string?)` callback. When provided, `set()` calls it before writing and errors if the validator rejects. ServerStore passes in a validator backed by `Validation.validateWrite`, so all writes through `observe():set()` are automatically checked against the schema. ObservableTable itself has no schema dependency -- the validator is an opaque function.
+`wrap(tbl, validator?)` accepts an optional `(path, value) -> (boolean, string?)` callback. When provided, `set()` validates its write and `setMany()` validates the complete batch before mutation. ServerStore passes in a validator backed by `Validation.validateWrite`, so all writes through `observe()` are automatically checked against the schema. ObservableTable itself has no schema dependency -- the validator is an opaque function.
 
-#### applyUpdate()
+#### applyUpdate() and applyUpdates()
 
-Unlike `set()` which errors if the path doesn't exist, `applyUpdate()` creates intermediate tables as needed. Used by ClientStore to apply server-sent updates to an initially-empty table. Not subject to validation since it's only called internally by the replication system.
+Unlike `set()` which errors if the path doesn't exist, `applyUpdate()` creates intermediate tables as needed. `applyUpdates()` does the same for an ordered batch, applying all changes before coalesced notifications. ClientStore uses these methods for server-sent updates. They are not subject to validation because they are only called internally by the replication system.
 
 ### Validation.luau
 
@@ -144,7 +157,7 @@ Manages the full player data lifecycle:
 
 1. **Load** -- Starts a ProfileStore session, runs migrations, validates data structure, wraps in ObservableTable with a schema-backed validator
 2. **Write validation** -- Every `set()` call on the ObservableTable is validated against the schema (path existence, type correctness, map path bypass)
-3. **Replicate** -- Root bind on the ObservableTable filters private paths and sends changes to the client via a library-owned RemoteEvent
+3. **Replicate** -- Root bind on the ObservableTable filters private paths and sends single changes or complete batches to the client via a library-owned RemoteEvent
 4. **Save hooks** -- Consumers register callbacks that run before each ProfileStore save
 5. **Unload** -- Ends the session, destroys the ObservableTable, cleans up references
 
@@ -166,7 +179,7 @@ Thin read-only wrapper around ObservableTable. On creation:
 1. Builds a client-side template from the schema (excluding private paths)
 2. Wraps it in an ObservableTable
 3. Connects to the server's RemoteEvent
-4. Applies incoming updates via `applyUpdate()`
+4. Applies incoming single updates via `applyUpdate()` and batches via `applyUpdates()`
 
 Exposes `get()`, `listen()`, and `bind()` -- no `set()`. The consumer can only read and react to data; mutations happen server-side only.
 
@@ -191,6 +204,12 @@ Only two markers exist: `map()` and `private()`. Everything else uses raw Luau v
 ### Automatic write validation
 
 Every `set()` on the server-side ObservableTable validates the path and value against the schema. This catches typos, type errors, and invalid paths immediately at the call site rather than silently corrupting data that would only fail on the next load. The validation is injected via an opaque callback, keeping ObservableTable generic and decoupled from the schema system.
+
+### Atomic batches over closure transactions
+
+Related writes use an ordered `setMany()` primitive rather than a closure-scoped transaction object. Player profiles already have one synchronous writer per session, so buffered read-through semantics would add complexity without improving concurrency safety. Ordered batches provide the needed all-or-nothing validation, rollback, coalesced notifications, and atomic client observation while retaining support for `nil` deletion and parent-before-child writes.
+
+Atomicity is scoped to one in-memory profile and its replication. Cross-profile writes are persisted independently by ProfileStore and cannot be made crash-safe by this abstraction.
 
 ### Disconnect functions over Connection objects
 

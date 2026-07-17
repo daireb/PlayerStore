@@ -5,7 +5,7 @@ Schema-driven player data management for Roblox. Wraps [ProfileStore](https://ma
 ## Installation
 
 ```bash
-pesde add gh#daireb/PlayerStore#v0.1.4
+pesde add gh#daireb/PlayerStore#v0.2.0
 pesde install
 ```
 
@@ -156,7 +156,7 @@ Parentheses are only needed when composing markers: `private(map {})`.
 
 ### Write validation
 
-All writes through `observe():set()` are automatically validated against the schema. Invalid paths and type mismatches error immediately:
+All writes through `observe():set()` and `observe():setMany()` are automatically validated against the schema. Invalid paths and type mismatches error immediately:
 
 ```lua
 obs:set("Resources/Cash", 100)       -- ok
@@ -164,6 +164,35 @@ obs:set("Resources/Cash", "wrong")   -- errors: type mismatch
 obs:set("Fake/Path", 5)              -- errors: invalid path
 obs:set("Inventory/Sword", 3)        -- ok (map path, any key allowed)
 ```
+
+### Atomic batch writes
+
+Use `setMany()` when related values must change together. It accepts an ordered list of updates, validates the complete batch before writing, and rolls back if any path cannot be applied:
+
+```lua
+local data = ServerData:getData(player)
+
+if data.Resources.Cash >= 100 then
+    ServerData:observe(player):setMany({
+        { path = "Resources/Cash", value = data.Resources.Cash - 100 },
+        { path = "Inventory/Sword", value = (data.Inventory.Sword or 0) + 1 },
+    })
+end
+```
+
+All writes are applied before listeners run. Each affected root, ancestor, or leaf listener fires once with the final state, and the batch is sent to the client in one replication event so client listeners also avoid intermediate states. The ordered form supports deleting dynamic map entries with `value = nil`.
+
+For batched notifications, the normal four callback arguments describe the last relevant write. An optional fifth argument contains the full ordered batch:
+
+```lua
+obs:listen("Resources", function(value, path, specificValue, specificPath, updates)
+    if updates then
+        print(`Committed {#updates} updates`)
+    end
+end)
+```
+
+`setMany()` is atomic for one player's in-memory profile and its replication. It does not provide crash-safe transactions across multiple players or profiles.
 
 ### Session end behavior
 
