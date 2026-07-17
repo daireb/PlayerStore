@@ -213,6 +213,35 @@ t:test("validateWrite accepts valid top-level path", function()
 	t:expectNil(err, "no error")
 end)
 
+t:test("validateWrite deeply validates structured table replacement", function()
+	local ok, err = Validation.validateWrite(testSchema, "Resources", {
+		Cash = 100,
+		XP = 50,
+	})
+
+	t:expect(ok, "complete structured table should pass")
+	t:expectNil(err, "no error")
+end)
+
+t:test("validateWrite rejects structured table missing a field", function()
+	local ok, err = Validation.validateWrite(testSchema, "Resources", {
+		Cash = 100,
+	})
+
+	t:expect(not ok, "incomplete structured table should fail")
+	t:expect(string.find(err, "Resources/XP") ~= nil, "error identifies missing nested field")
+end)
+
+t:test("validateWrite rejects wrong type inside structured table", function()
+	local ok, err = Validation.validateWrite(testSchema, "Resources", {
+		Cash = "invalid",
+		XP = 50,
+	})
+
+	t:expect(not ok, "nested type mismatch should fail")
+	t:expect(string.find(err, "Resources/Cash") ~= nil, "error identifies invalid nested field")
+end)
+
 t:test("validateWrite rejects wrong type", function()
 	local ok, err = Validation.validateWrite(testSchema, "Resources/Cash", "not a number")
 	t:expect(not ok, "should fail")
@@ -240,6 +269,31 @@ end)
 t:test("validateWrite allows setting map path itself", function()
 	local ok, err = Validation.validateWrite(testSchema, "Inventory", {})
 	t:expect(ok, "should pass — setting the map itself")
+	t:expectNil(err, "no error")
+end)
+
+t:test("validateWrite rejects wrong type when setting map itself", function()
+	local ok, err = Validation.validateWrite(testSchema, "Inventory", "invalid")
+	t:expect(not ok, "map field must retain its table type")
+	t:expect(string.find(err, "Type mismatch") ~= nil, "mentions type mismatch")
+end)
+
+t:test("validateWrite skips maps nested inside structured replacements", function()
+	local nestedMapSchema = schema {
+		Loadout = {
+			Name = "Default",
+			Items = map {} :: { [string]: number },
+		},
+	}
+	local ok, err = Validation.validateWrite(nestedMapSchema, "Loadout", {
+		Name = "Combat",
+		Items = {
+			Sword = 1,
+			Shield = 1,
+		},
+	})
+
+	t:expect(ok, "structured replacement with dynamic map should pass")
 	t:expectNil(err, "no error")
 end)
 

@@ -6,19 +6,12 @@ local Validation = {}
 
 local DATA_VERSION_KEY = "_DataVersion"
 
---[=[
-	Recursively validates that all keys in template exist in data with
-	matching types. Allows extra keys in data. Skips deep validation
-	for paths in mapPaths.
-]=]
-function Validation.validateData(
+local function validateDataRecursive(
 	data: { [string]: any },
 	template: { [string]: any },
 	mapPaths: { [string]: true },
-	path: string?
+	path: string
 ): (boolean, string?)
-	path = path or ""
-
 	for key, templateValue in template do
 		if key == DATA_VERSION_KEY then
 			continue
@@ -43,7 +36,7 @@ function Validation.validateData(
 				continue
 			end
 
-			local success, errorPath = Validation.validateData(dataValue, templateValue, mapPaths, currentPath)
+			local success, errorPath = validateDataRecursive(dataValue, templateValue, mapPaths, currentPath)
 			if not success then
 				return false, errorPath
 			end
@@ -53,23 +46,30 @@ function Validation.validateData(
 	return true, nil
 end
 
+--[=[
+	Recursively validates that all keys in template exist in data with
+	matching types. Allows extra keys in data. Skips deep validation
+	for paths in mapPaths.
+]=]
+function Validation.validateData(
+	data: { [string]: any },
+	template: { [string]: any },
+	mapPaths: { [string]: true },
+	path: string?
+): (boolean, string?)
+	debug.profilebegin("PlayerStore.Validation.validateData")
+	local success, errorPath = validateDataRecursive(data, template, mapPaths, path or "")
+	debug.profileend()
+	return success, errorPath
+end
+
 type Schema<T> = {
 	template: T,
 	mapPaths: { [string]: true },
 	privatePaths: { [string]: true },
 }
 
---[=[
-	Checks whether a path/value pair is a valid write against the schema.
-	Returns `true` if the path exists in the template (or is inside a map
-	path) and the value type matches. Useful for validating admin commands
-	or user input before calling `set()`.
-
-	```lua
-	local ok, err = PlayerStore.validateWrite(DataSchema, "Resources/Cash", 100)
-	```
-]=]
-function Validation.validateWrite(schema: Schema<any>, path: string, value: any): (boolean, string?)
+local function validateWriteInternal(schema: Schema<any>, path: string, value: any): (boolean, string?)
 	local template = schema.template :: any
 	local keys = string.split(path, "/")
 	local current = template
@@ -90,10 +90,6 @@ function Validation.validateWrite(schema: Schema<any>, path: string, value: any)
 			end
 			current = next
 		else
-			if schema.mapPaths[builtPath] then
-				return true, nil
-			end
-
 			local ancestor = table.concat(keys, "/", 1, #keys - 1)
 			if schema.mapPaths[ancestor] then
 				return true, nil
@@ -110,11 +106,39 @@ function Validation.validateWrite(schema: Schema<any>, path: string, value: any)
 				return false, `Type mismatch at {builtPath}: expected {expectedType}, got {actualType}`
 			end
 
+			if schema.mapPaths[builtPath] then
+				return true, nil
+			end
+
+			if expectedType == "table" then
+				debug.profilebegin("PlayerStore.Validation.validateWrite.deep")
+				local success, errorPath = validateDataRecursive(value, templateValue, schema.mapPaths, builtPath)
+				debug.profileend()
+				return success, errorPath
+			end
+
 			return true, nil
 		end
 	end
 
 	return false, "Empty path"
+end
+
+--[=[
+	Checks whether a path/value pair is a valid write against the schema.
+	Returns `true` if the path exists in the template (or is inside a map
+	path) and the value type matches. Useful for validating admin commands
+	or user input before calling `set()`.
+
+	```lua
+	local ok, err = PlayerStore.validateWrite(DataSchema, "Resources/Cash", 100)
+	```
+]=]
+function Validation.validateWrite(schema: Schema<any>, path: string, value: any): (boolean, string?)
+	debug.profilebegin("PlayerStore.Validation.validateWrite")
+	local success, errorPath = validateWriteInternal(schema, path, value)
+	debug.profileend()
+	return success, errorPath
 end
 
 return Validation

@@ -161,7 +161,9 @@ Unlike `set()` which errors if the path doesn't exist, `applyUpdate()` creates i
 Structural validation extracted from ServerStore. Two functions:
 
 - **`validateData(data, template, mapPaths)`** -- Recursively checks that all template keys exist in the data with matching types. Skips deep validation for map paths. Used on load after migrations.
-- **`validateWrite(schema, path, value)`** -- Checks a single path/value pair against the schema. Resolves the path through the template, returns early for map paths (any key allowed), and type-checks leaf values. Used as the ObservableTable validator on the server side.
+- **`validateWrite(schema, path, value)`** -- Checks a single path/value pair against the schema. Resolves the path through the template, allows arbitrary keys inside map paths while preserving the map field's table type, type-checks leaf values, and recursively validates fixed-structure table replacements. Used as the ObservableTable validator on the server side.
+
+Public validation boundaries emit MicroProfiler markers. `PlayerStore.Validation.validateData` measures load validation, `PlayerStore.Validation.validateWrite` measures every tracked write check, and the nested `PlayerStore.Validation.validateWrite.deep` marker isolates the conditional cost of structured table replacement.
 
 ### ServerStore.luau
 
@@ -216,7 +218,7 @@ Only two markers exist: `map()` and `private()`. Everything else uses raw Luau v
 
 ### Automatic write validation
 
-Every `set()` on the server-side ObservableTable validates the path and value against the schema. This catches typos, type errors, and invalid paths immediately at the call site rather than silently corrupting data that would only fail on the next load. The validation is injected via an opaque callback, keeping ObservableTable generic and decoupled from the schema system.
+Every `set()` on the server-side ObservableTable validates the path and value against the schema. This catches typos, type errors, invalid paths, and malformed structured table replacements immediately at the call site rather than silently corrupting data that would only fail on the next load. Deep traversal only occurs when replacing a fixed table; leaf and map writes retain their existing validation paths. The validation is injected via an opaque callback, keeping ObservableTable generic and decoupled from the schema system.
 
 ### Atomic batches over closure transactions
 

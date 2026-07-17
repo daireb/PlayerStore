@@ -169,6 +169,8 @@ obs:set("Fake/Path", 5)              -- errors: invalid path
 obs:set("Inventory/Sword", 3)        -- ok (map path, any key allowed)
 ```
 
+Replacing a fixed-structure table validates its complete subtree. This work only occurs for table replacements; normal leaf writes remain path/type checks, and `map()` contents still skip deep validation. MicroProfiler exposes `PlayerStore.Validation.validateWrite` and `PlayerStore.Validation.validateWrite.deep` markers for measuring both paths.
+
 ### Atomic batch writes
 
 Use `setMany()` when related values must change together. It accepts an ordered list of updates, validates the complete batch before writing, and rolls back if any path cannot be applied:
