@@ -4,6 +4,12 @@ All notable changes to PlayerStore will be documented in this file.
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `ServerStore:trySet()` and `trySetMany()` return `(boolean, string?)` instead of raising, including `"Data not loaded"` when no profile is present
+
 ## [0.2.0] - 2026-07-17
 
 ### Added

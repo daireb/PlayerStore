@@ -48,6 +48,8 @@ t:test("createServerStore returns a store object", function()
 	t:expectNotNil(store.unloadAsync, "has unloadAsync")
 	t:expectNotNil(store.getData, "has getData")
 	t:expectNotNil(store.observe, "has observe")
+	t:expectNotNil(store.trySet, "has trySet")
+	t:expectNotNil(store.trySetMany, "has trySetMany")
 end)
 
 t:test("loadAsync loads player data", function()
@@ -151,6 +153,117 @@ t:test("unloadAsync cleans up", function()
 	task.wait(0.5)
 
 	t:expectNil(store:getData(player), "data nil after unload")
+end)
+
+--------------------------------------------------------------------------------
+-- Checked writes
+--------------------------------------------------------------------------------
+
+t:test("trySet succeeds on a loaded profile", function()
+	local store = createTestStore("tryset")
+
+	store:loadAsync(player)
+
+	local ok, err = store:trySet(player, "Resources/Cash", 250)
+	t:expect(ok, "trySet returned true")
+	t:expectNil(err, "no error on success")
+	t:expectEqual(store:getData(player).Resources.Cash, 250, "Cash updated")
+
+	store:unloadAsync(player)
+end)
+
+t:test("trySetMany succeeds on a loaded profile", function()
+	local store = createTestStore("trysetmany")
+
+	store:loadAsync(player)
+
+	local ok, err = store:trySetMany(player, {
+		{ path = "Resources/Cash", value = 75 },
+		{ path = "Inventory/Sword", value = 1 },
+	})
+	t:expect(ok, "trySetMany returned true")
+	t:expectNil(err, "no error on success")
+
+	local data = store:getData(player)
+	t:expectEqual(data.Resources.Cash, 75, "Cash updated")
+	t:expectEqual(data.Inventory.Sword, 1, "Sword granted")
+
+	store:unloadAsync(player)
+end)
+
+t:test("trySet fails when data is not loaded", function()
+	local store = createTestStore("tryset_noload")
+
+	local ok, err = store:trySet(player, "Resources/Cash", 1)
+	t:expect(not ok, "trySet returned false")
+	t:expectEqual(err, "Data not loaded", "reports missing profile")
+end)
+
+t:test("trySetMany fails when data is not loaded", function()
+	local store = createTestStore("trysetmany_noload")
+
+	local ok, err = store:trySetMany(player, {
+		{ path = "Resources/Cash", value = 1 },
+	})
+	t:expect(not ok, "trySetMany returned false")
+	t:expectEqual(err, "Data not loaded", "reports missing profile")
+end)
+
+t:test("empty trySetMany succeeds without a loaded profile", function()
+	local store = createTestStore("trysetmany_empty")
+
+	local ok, err = store:trySetMany(player, {})
+	t:expect(ok, "empty batch returned true")
+	t:expectNil(err, "no error for empty batch")
+end)
+
+t:test("trySet returns validation errors without throwing", function()
+	local store = createTestStore("tryset_invalid")
+
+	store:loadAsync(player)
+
+	local ok, err = store:trySet(player, "Resources/Cash", "wrong")
+	t:expect(not ok, "invalid write returned false")
+	t:expectNotNil(err, "error message returned")
+	t:expectEqual(store:getData(player).Resources.Cash, 0, "Cash unchanged")
+
+	store:unloadAsync(player)
+end)
+
+t:test("trySetMany rejects invalid batches without mutation", function()
+	local store = createTestStore("trysetmany_invalid")
+
+	store:loadAsync(player)
+
+	local ok, err = store:trySetMany(player, {
+		{ path = "Resources/Cash", value = 100 },
+		{ path = "Resources/XP", value = "wrong" },
+	})
+	t:expect(not ok, "invalid batch returned false")
+	t:expectNotNil(err, "error message returned")
+
+	local data = store:getData(player)
+	t:expectEqual(data.Resources.Cash, 0, "earlier write was not applied")
+	t:expectEqual(data.Resources.XP, 0, "invalid write was not applied")
+
+	store:unloadAsync(player)
+end)
+
+t:test("trySetMany rolls back on path failure", function()
+	local store = createTestStore("trysetmany_rollback")
+
+	store:loadAsync(player)
+
+	local ok, err = store:trySetMany(player, {
+		{ path = "Resources/Cash", value = 100 },
+		{ path = "Inventory/Sword/Level", value = 1 },
+	})
+	t:expect(not ok, "missing intermediate path returned false")
+	t:expectNotNil(err, "error message returned")
+	t:expectEqual(store:getData(player).Resources.Cash, 0, "earlier write rolled back")
+	t:expectNil(store:getData(player).Inventory.Sword, "invalid path did not create data")
+
+	store:unloadAsync(player)
 end)
 
 --------------------------------------------------------------------------------

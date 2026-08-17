@@ -172,7 +172,7 @@ Public validation boundaries emit MicroProfiler markers. `PlayerStore.Validation
 Manages the full player data lifecycle:
 
 1. **Load** -- Starts a ProfileStore session, runs migrations, validates data structure, wraps in ObservableTable with a schema-backed validator
-2. **Write validation** -- Every `set()` call on the ObservableTable is validated against the schema (path existence, type correctness, map path bypass)
+2. **Write validation** -- Every `set()` and `setMany()` call on the ObservableTable is validated against the schema (path existence, type correctness, map path bypass). `trySet` and `trySetMany` delegate to those methods and return `(boolean, string?)` instead of raising.
 3. **Replicate** -- Root bind on the ObservableTable filters private paths and sends single changes or complete batches to the client via a library-owned RemoteEvent
 4. **Save hooks** -- Consumers register callbacks that run before each ProfileStore save
 5. **Unload** -- Ends the session, destroys the ObservableTable, cleans up references

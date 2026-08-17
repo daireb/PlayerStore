@@ -260,6 +260,38 @@ function ServerStore.observe<T>(self: any, player: Player): ObservableTable.Obse
 	return self._observables[player]
 end
 
+function ServerStore.trySet(self: any, player: Player, path: string, value: any): (boolean, string?)
+	local obs = self._observables[player]
+	if obs == nil then
+		return false, "Data not loaded"
+	end
+
+	local ok, err = pcall(obs.set, obs, path, value)
+	if not ok then
+		return false, tostring(err)
+	end
+
+	return true, nil
+end
+
+function ServerStore.trySetMany(self: any, player: Player, updates: { ObservableTable.Update }): (boolean, string?)
+	if #updates == 0 then
+		return true, nil
+	end
+
+	local obs = self._observables[player]
+	if obs == nil then
+		return false, "Data not loaded"
+	end
+
+	local ok, err = pcall(obs.setMany, obs, updates)
+	if not ok then
+		return false, tostring(err)
+	end
+
+	return true, nil
+end
+
 function ServerStore.waitForData<T>(self: any, player: Player, timeout: number?): T?
 	local startTime = tick()
 

@@ -73,9 +73,8 @@ end
 
 local function addCash(player: Player, amount: number)
     local data = ServerData:getData(player)
-    local obs = ServerData:observe(player)
-    if data and obs then
-        obs:set("Resources/Cash", data.Resources.Cash + amount)
+    if data then
+        ServerData:trySet(player, "Resources/Cash", data.Resources.Cash + amount)
     end
 end
 ```
@@ -137,14 +136,20 @@ Replacing a fixed-structure table validates its complete subtree. Dynamic `map()
 
 ### Atomic batch writes
 
-Use `setMany()` when related values must change together. It accepts an ordered list of updates, validates the complete batch before writing, and rolls back if any path cannot be applied:
+Use `setMany()` when related values must change together. It validates the complete batch before writing and rolls back if any path cannot be applied. `trySet` and `trySetMany` do the same work and return `(true, nil)` or `(false, error)` instead of raising, including `"Data not loaded"` when the profile is missing. An empty `trySetMany` is a successful no-op.
 
 ```lua
-local data = ServerData:getData(player)
-local obs = ServerData:observe(player)
+local function tryBuySword(player)
+    local data = ServerData:getData(player)
+    if not data then
+        return false, "Data not loaded"
+    end
 
-if data and obs and data.Resources.Cash >= 100 then
-    obs:setMany({
+    if data.Resources.Cash < 100 then
+        return false, "Not enough cash"
+    end
+
+    return ServerData:trySetMany(player, {
         { path = "Resources/Cash", value = data.Resources.Cash - 100 },
         { path = "Inventory/Sword", value = (data.Inventory.Sword or 0) + 1 },
     })
@@ -155,6 +160,7 @@ All writes are applied before listeners run. Each affected root, ancestor, or le
 
 ### Other server methods
 
+- `trySet(player, path, value)` and `trySetMany(player, updates)` return `(boolean, string?)` instead of raising.
 - `waitForData(player, timeout?)` waits for a profile and returns its typed data.
 - `onSave(callback)` registers work to run before ProfileStore saves.
 - `wipeData(player)` resets the profile to schema defaults.
