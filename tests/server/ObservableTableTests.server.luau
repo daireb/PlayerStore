@@ -271,24 +271,141 @@ t:test("writes cannot add string keys inside a dense array", function()
 	t:expectNil(data.Inventory.Swords.Name, "array remains dense")
 end)
 
-t:test("validated writes reject cycles formed through borrowed tables", function()
+t:test("writes copy borrowed tables before attaching them", function()
 	local testSchema = PlayerStore.schema { Inventory = PlayerStore.map {} }
-	local data: any = { Inventory = { A = {}, B = {} } }
+	local data: any = { Inventory = { A = { Count = 1 }, B = { Count = 2 } } }
 	local obs = ObservableTable.wrap(data, function(path, value)
 		return Validation.validateWrite(testSchema, path, value)
 	end)
-	t:expectError(function()
-		obs:set("Inventory/self", data.Inventory)
-	end, "parent alias rejected after attachment")
-	t:expectNil(data.Inventory.self, "single write rolled back")
-	t:expectError(function()
+	obs:set("Inventory/self", data.Inventory)
+	t:expectNil(data.Inventory.self.self, "borrowed parent copied before attachment")
+	obs:setMany({
+		{ path = "Inventory/A/Ref", value = data.Inventory.B },
+		{ path = "Inventory/B/Ref", value = data.Inventory.A },
+	})
+	t:expectEqual(data.Inventory.A.Ref.Count, 2, "first copied branch retained its value")
+	t:expectEqual(data.Inventory.B.Ref.Count, 1, "second copied branch retained its value")
+	t:expectNil(data.Inventory.A.Ref.Ref, "first copy is independent")
+	t:expectNil(data.Inventory.B.Ref.Ref, "all batch values copied before mutation")
+	t:expect(Validation.validateData(data, testSchema.template, testSchema.mapPaths), "data remains acyclic and valid")
+end)
+
+t:test("shared submitted branches cannot bypass fixed field validation or notifications", function()
+	for _, method in { "set", "setMany" } do
+		local testSchema = PlayerStore.schema { Record = { Dynamic = PlayerStore.map {}, Fixed = { Points = 0 } } }
+		local data: any = { Record = { Dynamic = {}, Fixed = { Points = 0 } } }
+		local obs = ObservableTable.wrap(data, function(path, value)
+			return Validation.validateWrite(testSchema, path, value)
+		end)
+		local shared = { Points = 1 }
+		local value = { Dynamic = shared, Fixed = shared }
+		if method == "set" then
+			obs:set("Record", value)
+		else
+			obs:setMany({ { path = "Record", value = value } })
+		end
+		local dynamicCalls, fixedCalls = 0, 0
+		obs:listen("Record/Dynamic/Points", function()
+			dynamicCalls += 1
+		end)
+		obs:listen("Record/Fixed/Points", function()
+			fixedCalls += 1
+		end)
+		obs:set("Record/Dynamic/Points", false)
+		task.wait()
+		t:expectEqual(data.Record.Fixed.Points, 1, "dynamic write did not change the fixed field")
+		t:expectEqual(shared.Points, 1, "submitted value is unchanged")
+		t:expectEqual(dynamicCalls, 1, "changed field was notified")
+		t:expectEqual(fixedCalls, 0, "unchanged fixed field was not notified")
+		t:expect(Validation.validateData(data, testSchema.template, testSchema.mapPaths), "fixed types remain valid")
+	end
+end)
+
+t:test("reusing one value across writes and batch members keeps branches independent", function()
+	local obs = ObservableTable.wrap({ Inventory = {} })
+	local value = { Count = 1 }
+	obs:set("Inventory/A", value)
+	obs:set("Inventory/B", value)
+	obs:setMany({
+		{ path = "Inventory/C", value = value },
+		{ path = "Inventory/D", value = value },
+	})
+	obs:set("Inventory/A/Count", 2)
+	obs:set("Inventory/C/Count", 3)
+	t:expectEqual(obs:get("Inventory/B/Count"), 1, "previously submitted value was copied on reuse")
+	t:expectEqual(obs:get("Inventory/D/Count"), 1, "each batch member owns its branch")
+	t:expectEqual(value.Count, 1, "caller still owns the original value")
+	value.Count = 99
+	t:expectEqual(obs:get("Inventory/A/Count"), 2, "caller mutation did not change the first single write")
+	t:expectEqual(obs:get("Inventory/B/Count"), 1, "caller mutation did not change the reused single write")
+	t:expectEqual(obs:get("Inventory/C/Count"), 3, "caller mutation did not change the first batch member")
+	t:expectEqual(obs:get("Inventory/D/Count"), 1, "caller mutation did not change the second batch member")
+end)
+
+t:test("frozen submitted values become mutable owned branches", function()
+	for _, method in { "set", "setMany" } do
+		local obs = ObservableTable.wrap({ Inventory = {} })
+		local value = table.freeze({ Count = 1, Nested = table.freeze({ Count = 2 }) })
+		if method == "set" then
+			obs:set("Inventory/Item", value)
+		else
+			obs:setMany({ { path = "Inventory/Item", value = value } })
+		end
 		obs:setMany({
-			{ path = "Inventory/A/Ref", value = data.Inventory.B },
-			{ path = "Inventory/B/Ref", value = data.Inventory.A },
+			{ path = "Inventory/Item/Count", value = 3 },
+			{ path = "Inventory/Item/Nested/Count", value = 4 },
 		})
-	end, "cross-write cycle rejected")
-	t:expectNil(data.Inventory.A.Ref, "first batch assignment rolled back")
-	t:expectNil(data.Inventory.B.Ref, "second batch assignment rolled back")
+		t:expectEqual(obs:get("Inventory/Item/Count"), 3, "copied root can be updated")
+		t:expectEqual(obs:get("Inventory/Item/Nested/Count"), 4, "copied nested table can be updated")
+		t:expectEqual(value.Count, 1, "frozen caller root is unchanged")
+		t:expectEqual(value.Nested.Count, 2, "frozen caller descendant is unchanged")
+	end
+end)
+
+t:test("batch rollback survives frozen existing write targets and intermediates", function()
+	for _, case in { { "setMany", "Inventory/Frozen/Count" }, { "applyUpdates", "Inventory/Frozen/New/Count" } } do
+		local data: any = { Cash = 0, Inventory = { Frozen = table.freeze({ Count = 1 }) } }
+		local commits, notifications = 0, 0
+		local obs = ObservableTable.wrap(data, nil, function()
+			commits += 1
+		end)
+		obs:listen(function()
+			notifications += 1
+		end)
+		t:expectError(function()
+			(obs :: any)[case[1]](obs, { { path = "Cash", value = 100 }, { path = case[2], value = 2 } })
+		end, "frozen target should reject the write")
+		task.wait()
+		t:expectEqual(data.Cash, 0, "earlier write rolled back despite frozen target")
+		t:expectEqual(data.Inventory.Frozen.Count, 1, "frozen value remains unchanged")
+		t:expectNil(data.Inventory.Frozen.New, "failed intermediate creation left no branch")
+		t:expectEqual(commits, 0, "failed batch did not replicate")
+		t:expectEqual(notifications, 0, "failed batch did not notify")
+	end
+end)
+
+t:test("cyclic submissions fail before copying or committing without a schema validator", function()
+	for _, useValidator in { false, true } do
+		local data: any = { Cash = 0, Inventory = {} }
+		local obs = ObservableTable.wrap(
+			data,
+			if useValidator
+				then function()
+					return true, nil
+				end
+				else nil
+		)
+		local cyclic: any = {}
+		cyclic.self = cyclic
+		t:expectError(function()
+			obs:set("Inventory/Item", cyclic)
+		end, "single cyclic submission rejected")
+		t:expectError(function()
+			obs:setMany({ { path = "Cash", value = 100 }, { path = "Inventory/Item", value = cyclic } })
+		end, "cyclic batch submission rejected")
+		t:expectEqual(data.Cash, 0, "earlier batch write was not committed")
+		t:expectNil(data.Inventory.Item, "cyclic value was never attached")
+	end
 end)
 
 t:test("commit hook runs before listeners and once per batch", function()
@@ -686,7 +803,7 @@ t:test("validator allows valid writes", function()
 	t:expectEqual(data.Cash, 100, "write went through")
 end)
 
-t:test("no validator means no validation", function()
+t:test("no validator permits scalar type changes", function()
 	local data = { Cash = 0 }
 	local obs = ObservableTable.wrap(data)
 

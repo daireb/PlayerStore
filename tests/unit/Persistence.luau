@@ -2,13 +2,15 @@ local task = require("@lune/task")
 
 return function(Runtime, TestRunner)
 	local t = TestRunner.new("Persistence and ownership")
-	local function setup(saved, migrations)
+	local function setup(saved, migrations, schemaFactory)
 		local world = Runtime.new()
 		world.saved = saved
 		local library = world.load(world.root)
 		local player = world:player(1)
 		local store = library.createServerStore {
-			schema = library.schema { Count = 0, Added = 7, Private = library.private {} },
+			schema = if schemaFactory
+				then schemaFactory(library)
+				else library.schema { Count = 0, Added = 7, Private = library.private {} },
 			storeId = "Unit",
 			profileStore = world.ProfileStore,
 			migrations = migrations,
@@ -17,6 +19,21 @@ return function(Runtime, TestRunner)
 	end
 	local function saved(version)
 		return { _DataVersion = version, Count = 2, Private = {} }
+	end
+	local function seededMapSchema(library)
+		return library.schema {
+			Inventory = library.map { StarterItem = 1 },
+			Progress = { Rewards = library.map { StarterReward = true }, Level = 1 },
+			Private = library.private(library.map { StarterFlag = true }),
+			Added = 7,
+		}
+	end
+	local function waitForResults(results)
+		local deadline = os.clock() + 1
+		while results[1] == nil or results[2] == nil do
+			t:expect(os.clock() < deadline, "concurrent loads did not finish")
+			task.wait()
+		end
 	end
 
 	t:test("migrations see saved shape, then missing defaults reconcile", function()
@@ -40,6 +57,35 @@ return function(Runtime, TestRunner)
 		local _, store, player = setup(saved(0))
 		t:expect(store:loadAsync(player))
 		t:expectEqual(store:getData(player).Added, 7)
+		store:Destroy()
+	end)
+
+	for _, path in { "Inventory/StarterItem", "Progress/Rewards/StarterReward", "Private/StarterFlag" } do
+		t:test(`reconciliation preserves deleted entry at {path}`, function()
+			local _, store, player = setup({
+				_DataVersion = 0,
+				Inventory = {},
+				Progress = { Rewards = {} },
+				Private = {},
+			}, nil, seededMapSchema)
+			t:expect(store:loadAsync(player))
+			t:expectNil(store:observe(player):get(path), "deleted map entry stays deleted")
+			local data = store:getData(player)
+			t:expectEqual(data.Progress.Level, 1, "ordinary nested defaults still reconcile")
+			t:expectEqual(data.Added, 7, "ordinary root defaults still reconcile")
+			store:Destroy()
+		end)
+	end
+
+	t:test("reconciliation initializes entirely missing root and nested maps", function()
+		local _, store, player = setup({ _DataVersion = 0, Progress = {} }, nil, seededMapSchema)
+		t:expect(store:loadAsync(player))
+		local data = store:getData(player)
+		t:expectEqual(data.Inventory.StarterItem, 1)
+		t:expectEqual(data.Progress.Rewards.StarterReward, true)
+		t:expectEqual(data.Private.StarterFlag, true)
+		t:expectEqual(data.Progress.Level, 1)
+		t:expectEqual(data.Added, 7)
 		store:Destroy()
 	end)
 
@@ -80,6 +126,56 @@ return function(Runtime, TestRunner)
 		t:expect(not store:loadAsync(player))
 		t:expectEqual(world.profiles[1].endedData.Count, 2)
 		t:expectEqual(world.profiles[1].endedData._DataVersion, 0)
+		store:Destroy()
+	end)
+
+	t:test("migration-created aliases cannot couple fixed fields to map writes", function()
+		local _, store, player = setup({ _DataVersion = 0 }, {
+			function(data)
+				local shared = { Value = 2 }
+				data.Fixed = shared
+				data.Dynamic = shared
+			end,
+		}, function(library)
+			return library.schema { Fixed = { Value = 0 }, Dynamic = library.map {} }
+		end)
+		t:expect(store:loadAsync(player))
+		t:expect(store:trySet(player, "Dynamic/Value", "map value"))
+		t:expectEqual(store:getData(player).Fixed.Value, 2, "map writes must not alter fixed fields")
+		store:Destroy()
+	end)
+
+	for _, freezeRoot in { false, true } do
+		t:test(`frozen migration output is reconciled and writable (root frozen: {freezeRoot})`, function()
+			local _, store, player = setup(saved(0), {
+				function(data)
+					data.Fixed = table.freeze { Value = 2 }
+					if freezeRoot then
+						table.freeze(data)
+					end
+				end,
+			}, function(library)
+				return library.schema { Fixed = { Value = 0, Added = 7 } }
+			end)
+			t:expect(store:loadAsync(player))
+			t:expectEqual(store:getData(player).Fixed.Added, 7)
+			t:expect(store:trySet(player, "Fixed/Value", 3))
+			t:expectEqual(store:getData(player).Fixed.Value, 3)
+			store:Destroy()
+		end)
+	end
+
+	t:test("cyclic migration output fails without replacing the saved profile", function()
+		local world, store, player = setup(saved(0), {
+			function(data)
+				data.Count = 999
+				data.Cycle = data
+			end,
+		})
+		t:expect(not store:loadAsync(player))
+		t:expectEqual(world.profiles[1].endedData.Count, 2)
+		t:expectEqual(world.profiles[1].endedData._DataVersion, 0)
+		t:expectNil(world.profiles[1].endedData.Cycle)
 		store:Destroy()
 	end)
 
@@ -239,6 +335,139 @@ return function(Runtime, TestRunner)
 		t:expectEqual(first, true)
 		t:expectEqual(second, true)
 		t:expectEqual(world.starts, 1)
+		store:Destroy()
+	end)
+
+	t:test("unload cancels both in-flight loads but allows a later new call", function()
+		local world, store, player = setup()
+		local acquisition
+		world.startHook = function()
+			acquisition = coroutine.running()
+			coroutine.yield()
+		end
+		local results = {}
+		local entered = 0
+		for index = 1, 2 do
+			task.spawn(function()
+				entered += 1
+				results[index] = store:loadAsync(player)
+			end)
+		end
+		t:expectEqual(entered, 2, "both calls started before unload")
+		t:expectEqual(world.starts, 1, "duplicate call waits for the first acquisition")
+		store:unloadAsync(player)
+		world.startHook = nil
+		task.spawn(acquisition)
+		waitForResults(results)
+		t:expectEqual(results[1], false)
+		t:expectEqual(results[2], false, "waiting duplicate must share cancellation")
+		t:expectEqual(world.starts, 1, "cancelled duplicate must not acquire again")
+		t:expectNil(store:getData(player))
+		t:expectNil(player.kicked)
+		t:expect(store:loadAsync(player), "a new call after cancellation may acquire")
+		t:expectEqual(world.starts, 2)
+		store:Destroy()
+	end)
+
+	t:test("a waiting duplicate shares acquisition failure without retrying", function()
+		local world, store, player = setup()
+		local acquisition
+		world.startHook = function()
+			acquisition = coroutine.running()
+			coroutine.yield()
+			error("injected acquisition failure")
+		end
+		local results = {}
+		local entered = 0
+		for index = 1, 2 do
+			task.spawn(function()
+				entered += 1
+				results[index] = store:loadAsync(player)
+			end)
+		end
+		t:expectEqual(entered, 2)
+		t:expectEqual(world.starts, 1)
+		world.startHook = nil
+		task.spawn(acquisition)
+		waitForResults(results)
+		t:expectEqual(results[1], false)
+		t:expectEqual(results[2], false, "waiting duplicate must share failure")
+		t:expectEqual(world.starts, 1, "failed acquisition must not be silently retried")
+		t:expectNil(store:getData(player))
+		store:Destroy()
+	end)
+
+	t:test("unload cancels a replacement Player waiting behind the old Player", function()
+		local world, store, old = setup()
+		local player = world:player(old.UserId)
+		local acquisition
+		world.startHook = function()
+			acquisition = coroutine.running()
+			coroutine.yield()
+		end
+		local results = {}
+		task.spawn(function()
+			results[1] = store:loadAsync(old)
+		end)
+		old.Parent = nil
+		world.players.PlayerRemoving:Fire(old)
+		local entered = false
+		task.spawn(function()
+			entered = true
+			results[2] = store:loadAsync(player)
+		end)
+		t:expect(entered, "replacement call started before unload")
+		t:expectEqual(world.starts, 1, "replacement waits for the old acquisition")
+		store:unloadAsync(player)
+		world.startHook = nil
+		task.spawn(acquisition)
+		waitForResults(results)
+		t:expectEqual(results[1], false)
+		t:expectEqual(results[2], false, "queued replacement must be cancelled")
+		t:expectEqual(world.starts, 1)
+		t:expectNil(store:getData(player))
+		t:expectNil(player.kicked)
+		t:expect(store:loadAsync(player), "a later explicit call may acquire")
+		t:expectEqual(world.starts, 2)
+		store:Destroy()
+	end)
+
+	t:test("queued replacement duplicates share a failed acquisition", function()
+		local world, store, old = setup()
+		local player = world:player(old.UserId)
+		local acquisition
+		world.startHook = function()
+			acquisition = coroutine.running()
+			coroutine.yield()
+		end
+		local oldResult
+		task.spawn(function()
+			oldResult = store:loadAsync(old)
+		end)
+		old.Parent = nil
+		world.players.PlayerRemoving:Fire(old)
+		local results = {}
+		local entered = 0
+		for index = 1, 2 do
+			task.spawn(function()
+				entered += 1
+				results[index] = store:loadAsync(player)
+			end)
+		end
+		t:expectEqual(entered, 2, "both replacement calls started while the old acquisition was blocked")
+		t:expectEqual(world.starts, 1)
+		world.startHook = function()
+			if world.starts == 2 then
+				error("injected replacement acquisition failure")
+			end
+		end
+		task.spawn(acquisition)
+		waitForResults(results)
+		t:expectEqual(oldResult, false)
+		t:expectEqual(results[1], false)
+		t:expectEqual(results[2], false, "queued duplicate must share the replacement failure")
+		t:expectEqual(world.starts, 2, "only one replacement acquisition may start")
+		t:expectNil(store:getData(player))
 		store:Destroy()
 	end)
 

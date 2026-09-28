@@ -10,6 +10,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local deepClone = require(script.Parent.DeepClone)
+local DataValue = require(script.Parent.DataValue)
 local ObservableTable = require(script.Parent.ObservableTable)
 local Validation = require(script.Parent.Validation)
 
@@ -22,14 +23,15 @@ local function validTimeout(timeout: any): boolean
 	return type(timeout) == "number" and timeout == timeout and timeout >= 0 and timeout < math.huge
 end
 
-local function reconcile(target: { [any]: any }, template: { [any]: any })
+local function reconcile(target: { [any]: any }, template: { [any]: any }, mapPaths: { [string]: true }, path: string)
 	for key, value in template do
 		if type(key) == "string" then
 			local current = target[key]
+			local childPath = if path == "" then key else `{path}/{key}`
 			if current == nil then
 				target[key] = deepClone(value)
-			elseif type(current) == "table" and type(value) == "table" then
-				reconcile(current, value)
+			elseif type(current) == "table" and type(value) == "table" and not mapPaths[childPath] then
+				reconcile(current, value, mapPaths, childPath)
 			end
 		end
 	end
@@ -102,6 +104,7 @@ function ServerStore.new<T>(config: ServerStoreConfig<T>)
 		_profiles = {} :: { [number]: any },
 		_owners = {} :: { [number]: Player },
 		_observables = {} :: { [Player]: any },
+		_loadAttempts = {} :: { [Player]: any },
 		_loading = {} :: { [number]: any },
 		_releasing = {} :: { [number]: any },
 		_releaseConnections = {} :: { [any]: any },
@@ -112,7 +115,7 @@ function ServerStore.new<T>(config: ServerStoreConfig<T>)
 		_snapshotTimers = {} :: { [Player]: any },
 		_lastSnapshotSent = {} :: { [Player]: number },
 		-- Late load/removal callbacks must not retain departed Player instances.
-		_loadFailed = setmetatable({}, { __mode = "k" }) :: { [Player]: boolean },
+		_loadFailed = setmetatable({} :: { [Player]: boolean }, { __mode = "k" }),
 		_saveCallbacks = {} :: { [number]: (player: Player, data: any) -> () },
 		_nextSaveCallbackId = 0,
 		_destroyed = false,
@@ -150,8 +153,8 @@ function ServerStore.new<T>(config: ServerStoreConfig<T>)
 		self:_sendSnapshotIfReady(player)
 	end)
 	self._removingConnection = Players.PlayerRemoving:Connect(function(player: Player)
-		local token = self._loading[player.UserId]
-		if token and token.player == player then
+		local token = self._loadAttempts[player]
+		if token then
 			token.cancelled = true
 		end
 		self._snapshotPending[player] = nil
@@ -196,17 +199,32 @@ function ServerStore._runMigrations(self: any, player: Player, profile: any, can
 	local data = deepClone(original)
 	if currentVersion ~= -1 then
 		for i = currentVersion + 1, latestVersion do
-			local success, err = pcall(self._migrations[i], data)
+			local success, err = pcall(function()
+				self._migrations[i](data)
+				if table.isfrozen(data) then
+					data = table.clone(data)
+				end
+				data[DATA_VERSION_KEY] = i
+			end)
 			if not success then
 				warn(`[PlayerStore] Migration {i} failed for {player.DisplayName}: {err}`)
 				player:Kick(`Data migration failed at version {i}. Please rejoin or contact support.`)
 				return false
 			end
-
-			data[DATA_VERSION_KEY] = i
 		end
 	end
-	local reconciled, reconcileError = pcall(reconcile, data, self._schema.template :: any)
+	if currentVersion ~= -1 and currentVersion < latestVersion then
+		-- Migrations may introduce aliases or frozen branches. Reject cycles before
+		-- copying their output into independently owned, mutable trees.
+		local valid, errorPath = DataValue.validate(data)
+		if not valid then
+			warn(`[PlayerStore] Validation failed for {player.DisplayName}: {errorPath}`)
+			player:Kick(`Data validation failed: {errorPath}. Please contact support.`)
+			return false
+		end
+		data = deepClone(data)
+	end
+	local reconciled, reconcileError = pcall(reconcile, data, self._schema.template :: any, self._schema.mapPaths, "")
 	if not reconciled then
 		warn(`[PlayerStore] Reconcile failed for {player.DisplayName}: {reconcileError}`)
 		player:Kick("Data migration failed - Please contact support")
@@ -352,35 +370,60 @@ function ServerStore.loadAsync(self: any, player: Player): boolean
 	if self:_activeProfile(player) ~= nil then
 		return true
 	end
+	local deadline = os.clock() + DEFAULT_LOAD_WAIT
+	local pending = self._loadAttempts[player]
+	if pending then
+		-- Share this call's outcome even if it is still queued behind an old Player.
+		while pending.result == nil do
+			if pending.cancelled or self._destroyed or player.Parent ~= Players or os.clock() >= deadline then
+				return false
+			end
+			task.wait(0.05)
+		end
+		return pending.result == true and self:_activeProfile(player) ~= nil
+	end
+	local token = { cancelled = false, player = player }
+	self._loadAttempts[player] = token
+	local function cancelled(): boolean
+		return token.cancelled or self._destroyed or player.Parent ~= Players or os.clock() >= deadline
+	end
+	local function complete(result: boolean): boolean
+		token.result = result
+		if self._loadAttempts[player] == token then
+			self._loadAttempts[player] = nil
+		end
+		if self._loading[userId] == token then
+			self._loading[userId] = nil
+		end
+		return result
+	end
 	-- ProfileStore rejects a second StartSessionAsync for a key already
 	-- loading or owned in this process.
-	local deadline = os.clock() + DEFAULT_LOAD_WAIT
 	while self._loading[userId] ~= nil or self._profiles[userId] ~= nil or self._releasing[userId] ~= nil do
+		if cancelled() then
+			return complete(false)
+		end
 		if self:_activeProfile(player) ~= nil then
-			return true
+			return complete(true)
 		end
 		local releasing = self._releasing[userId]
 		if releasing and not releasing:IsActive() then
 			self._releasing[userId] = nil
 			continue
 		end
-		if self._destroyed or player.Parent ~= Players or os.clock() >= deadline then
-			return false
-		end
 		task.wait(0.05)
 	end
-	local token = { cancelled = false, player = player }
+	if cancelled() then
+		return complete(false)
+	end
 	self._loading[userId] = token
 	self._loadFailed[player] = nil
 	local success, profile = pcall(function()
 		return self._playerStore:StartSessionAsync(`{userId}`, {
-			Cancel = function()
-				return token.cancelled or self._destroyed or player.Parent ~= Players or os.clock() >= deadline
-			end,
+			Cancel = cancelled,
 		})
 	end)
 	if not success or profile == nil then
-		self._loading[userId] = nil
 		self._loadFailed[player] = true
 		if not success then
 			warn(`[PlayerStore] Load failed for {player.DisplayName}: {profile}`)
@@ -388,33 +431,25 @@ function ServerStore.loadAsync(self: any, player: Player): boolean
 		if player.Parent == Players and not token.cancelled and not self._destroyed then
 			player:Kick("Failed to load data - Please rejoin")
 		end
-		return false
+		return complete(false)
 	end
-	if token.cancelled or self._destroyed or player.Parent ~= Players then
+	if cancelled() then
 		self:_releaseUnpublished(userId, profile)
-		self._loading[userId] = nil
-		return false
+		return complete(false)
 	end
 	profile:AddUserId(userId)
 	if
 		not self:_runMigrations(player, profile, function()
-			return self._loading[userId] == token
-				and not token.cancelled
-				and not self._destroyed
-				and player.Parent == Players
-				and profile:IsActive()
-				and os.clock() < deadline
+			return self._loading[userId] == token and not cancelled() and profile:IsActive()
 		end)
 	then
 		self._loadFailed[player] = true
 		self:_releaseUnpublished(userId, profile)
-		self._loading[userId] = nil
-		return false
+		return complete(false)
 	end
-	if token.cancelled or self._destroyed or player.Parent ~= Players or not profile:IsActive() then
+	if cancelled() or not profile:IsActive() then
 		self:_releaseUnpublished(userId, profile)
-		self._loading[userId] = nil
-		return false
+		return complete(false)
 	end
 
 	local observable = ObservableTable.wrap(profile.Data, function(path, value)
@@ -451,14 +486,14 @@ function ServerStore.loadAsync(self: any, player: Player): boolean
 		self:_runSaveCallbacks(player, profile)
 	end)
 	self._profileConnections[profile] = { sessionConnection, saveConnection }
-	self._loading[userId] = nil
+	complete(true)
 	self:_sendSnapshotIfReady(player)
 	return true
 end
 
 function ServerStore.unloadAsync(self: any, player: Player)
-	local loading = self._loading[player.UserId]
-	if loading and loading.player == player then
+	local loading = self._loadAttempts[player]
+	if loading then
 		loading.cancelled = true
 	end
 	self._loadFailed[player] = true
@@ -636,7 +671,7 @@ function ServerStore.Destroy(self: any)
 	self._destroyed = true
 	-- Destroy ends wrapper callbacks immediately. ProfileStore still performs the
 	-- final save of already committed data when each session is released.
-	for _, token in self._loading do
+	for _, token in self._loadAttempts do
 		token.cancelled = true
 	end
 	local owned = {}
@@ -675,6 +710,7 @@ function ServerStore.Destroy(self: any)
 	end
 	table.clear(self._manualEnd)
 	table.clear(self._releasing)
+	table.clear(self._loadAttempts)
 	table.clear(self._loading)
 	table.clear(self._loadFailed)
 	self._remoteConnection:Disconnect()

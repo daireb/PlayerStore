@@ -2,14 +2,16 @@
 return function(Runtime, TestRunner)
 	local t = TestRunner.new("Replication protocol")
 
-	local function setup()
+	local function setup(makeSchema)
 		local world = Runtime.new()
 		local library = world.load(world.root)
-		local schema = library.schema {
-			Cash = 0,
-			Inventory = library.map {} :: { [string]: number },
-			Secret = library.private { Token = "server only" },
-		}
+		local schema = if makeSchema
+			then makeSchema(library)
+			else library.schema {
+				Cash = 0,
+				Inventory = library.map {} :: { [string]: number },
+				Secret = library.private { Token = "server only" },
+			}
 		local player = world:player(1)
 		local server = library.createServerStore {
 			schema = schema,
@@ -124,6 +126,99 @@ return function(Runtime, TestRunner)
 		t:expectEqual(observedInventory, 2, "listener saw complete batch")
 		local batch = world.messages[#world.messages].args[1]
 		t:expectEqual(#batch, 2, "only public updates sent")
+		disconnect()
+		client:Destroy()
+		server:Destroy()
+	end)
+
+	t:test("aliased submissions cannot corrupt fixed fields or diverge clients", function()
+		local task = require("@lune/task")
+		for _, method in { "set", "setMany" } do
+			local world, player, server, makeClient = setup(function(library)
+				return library.schema {
+					Pair = { Fixed = { Count = 0 }, Dynamic = library.map {} },
+				}
+			end)
+			t:expect(server:loadAsync(player), "profile loaded")
+			local client = makeClient()
+			world:flush()
+			local shared = { Count = 5 }
+			if method == "set" then
+				t:expect(server:trySet(player, "Pair", { Fixed = shared, Dynamic = { Alias = shared } }))
+			else
+				t:expect(server:trySetMany(player, {
+					{ path = "Pair/Fixed", value = shared },
+					{ path = "Pair/Dynamic", value = { Alias = shared } },
+				}))
+			end
+			world:flush()
+			task.wait()
+			local fixedNotifications = 0
+			local serverObservedFixed, clientObservedFixed
+			local disconnectFixed = server:observe(player):listen("Pair/Fixed/Count", function()
+				fixedNotifications += 1
+			end)
+			local disconnectServer = server:observe(player):listen("Pair/Dynamic/Alias/Count", function()
+				serverObservedFixed = server:getData(player).Pair.Fixed.Count
+			end)
+			local disconnectClient = client:listen("Pair/Dynamic/Alias/Count", function()
+				clientObservedFixed = client:get("Pair/Fixed/Count")
+			end)
+			local messagesBefore = #world.messages
+			t:expect(server:trySet(player, "Pair/Dynamic/Alias/Count", "dynamic value"))
+			world:flush()
+			task.wait()
+			t:expectEqual(server:getData(player).Pair.Fixed.Count, 5, method .. " preserves fixed field")
+			t:expectEqual(client:get("Pair/Fixed/Count"), 5, method .. " client agrees with server")
+			t:expectEqual(serverObservedFixed, 5, method .. " server listener sees valid fixed field")
+			t:expectEqual(clientObservedFixed, 5, method .. " client listener sees valid fixed field")
+			t:expectEqual(fixedNotifications, 0, "unmodified fixed field has no notification")
+			t:expectEqual(server:getData(player).Pair.Dynamic.Alias.Count, "dynamic value")
+			t:expectEqual(client:get("Pair/Dynamic/Alias/Count"), "dynamic value")
+			t:expectEqual(#world.messages, messagesBefore + 1, "one tracked delta sent")
+			t:expectEqual(world.messages[#world.messages].args[1], "Pair/Dynamic/Alias/Count")
+			disconnectFixed()
+			disconnectServer()
+			disconnectClient()
+			client:Destroy()
+			server:Destroy()
+		end
+	end)
+
+	t:test("frozen submitted tables support later atomic batches and replication", function()
+		local world, player, server, makeClient = setup()
+		local task = require("@lune/task")
+		t:expect(server:loadAsync(player), "profile loaded")
+		local client = makeClient()
+		world:flush()
+		local inventory = table.freeze { Sword = table.freeze { Count = 1 } }
+		t:expect(server:trySet(player, "Inventory", inventory), "frozen value accepted")
+		world:flush()
+		task.wait()
+		local observedCash, observedCount
+		local disconnect = client:listen("Cash", function(value)
+			observedCash = value
+			observedCount = client:get("Inventory/Sword/Count")
+		end)
+		local messagesBefore = #world.messages
+		t:expect(
+			server:trySetMany(player, {
+				{ path = "Cash", value = 20 },
+				{ path = "Inventory/Sword/Count", value = 2 },
+			}),
+			"submitted tables become mutable store data"
+		)
+		world:flush()
+		task.wait()
+		t:expectEqual(server:getData(player).Cash, 20)
+		t:expectEqual(server:getData(player).Inventory.Sword.Count, 2)
+		t:expectEqual(client:get("Cash"), 20)
+		t:expectEqual(client:get("Inventory/Sword/Count"), 2)
+		t:expectEqual(observedCash, 20)
+		t:expectEqual(observedCount, 2, "listener sees the complete batch")
+		t:expectEqual(inventory.Sword.Count, 1, "submitted value stays unchanged")
+		t:expectEqual(#world.messages, messagesBefore + 1, "one batch sent")
+		t:expectEqual(#world.messages[#world.messages].args[1], 2, "both changes share one message")
 		disconnect()
 		client:Destroy()
 		server:Destroy()

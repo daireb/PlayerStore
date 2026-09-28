@@ -12,6 +12,7 @@
 
 local Signal = require(script.Parent.Signal)
 local DataValue = require(script.Parent.DataValue)
+local deepClone = require(script.Parent.DeepClone)
 
 --------------------------------------------------------------------------------
 -- Types
@@ -213,6 +214,18 @@ local function copyUpdates(updates: { Update }): { Update }
 	return copied
 end
 
+local function copyWriteValue(path: string, value: any): any
+	if typeof(value) ~= "table" then
+		return value
+	end
+	local valid, reason = DataValue.validate(value, path)
+	if not valid then
+		error(`[PlayerStore] Invalid write to "{path}": {reason}`)
+	end
+	-- Separate every submitted branch, including repeated references and frozen tables.
+	return deepClone(value)
+end
+
 local function resolveWriteTarget(
 	self: InternalObservableTable<any>,
 	path: string,
@@ -234,12 +247,12 @@ local function resolveWriteTarget(
 			if not createIntermediates then
 				error(`Path "{path}" does not exist in the table`)
 			end
+			current[keys[i]] = {}
 			table.insert(undo, {
 				parent = current,
 				key = keys[i],
 				hadValue = false,
 			})
-			current[keys[i]] = {}
 		end
 
 		current = current[keys[i]]
@@ -335,25 +348,13 @@ local function commitUpdates(
 			keysByUpdate[update] = keys
 			local parent, key = resolveWriteTarget(self, update.path, keys, createIntermediates, undo)
 			local oldValue = parent[key]
+			parent[key] = update.value
 			table.insert(undo, {
 				parent = parent,
 				key = key,
 				hadValue = oldValue ~= nil,
 				value = oldValue,
 			})
-			parent[key] = update.value
-		end
-		-- Earlier assignments can turn an individually valid borrowed table into
-		-- a cycle through another path. Check only newly attached subgraphs.
-		if self._validator then
-			for _, update in ipairs(updates) do
-				if typeof(update.value) == "table" then
-					local valid, reason = DataValue.validate(update.value, update.path)
-					if not valid then
-						error(reason)
-					end
-				end
-			end
 		end
 	end)
 
@@ -405,17 +406,10 @@ function ObservableTable.set<T>(self: InternalObservableTable<T>, path: string, 
 		end
 	end
 
+	value = copyWriteValue(path, value)
 	local keys = string.split(path, "/")
 	local current, key = resolveWriteTarget(self, path, keys, false, {})
-	local previous = current[key]
 	current[key] = value
-	if self._validator and typeof(value) == "table" then
-		local valueValid, reason = DataValue.validate(value, path)
-		if not valueValid then
-			current[key] = previous
-			error(`[PlayerStore] Invalid write to "{path}": {reason}`)
-		end
-	end
 	if self._onCommit then
 		self._onCommit(path, value, nil)
 	end
@@ -437,6 +431,9 @@ function ObservableTable.setMany<T>(self: InternalObservableTable<T>, updates: {
 				error(`[PlayerStore] Invalid write to "{update.path}": {err}`)
 			end
 		end
+	end
+	for _, update in copiedUpdates do
+		update.value = copyWriteValue(update.path, update.value)
 	end
 
 	commitUpdates(self, copiedUpdates, false, true)
