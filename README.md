@@ -4,10 +4,10 @@ Player data for Roblox: [ProfileStore](https://madstudioroblox.github.io/Profile
 
 ## Install
 
-Install a tagged release with pesde. When testing an unreleased branch, pin its reviewed commit instead; this branch's breaking changes are listed in [CHANGELOG.md](CHANGELOG.md).
+Install v0.4.0 with pesde. Review the breaking changes from 0.3.0 in [CHANGELOG.md](CHANGELOG.md) before upgrading.
 
 ```sh
-pesde add gh#daireb/PlayerStore#v0.3.0
+pesde add gh#daireb/PlayerStore#v0.4.0
 pesde install
 ```
 

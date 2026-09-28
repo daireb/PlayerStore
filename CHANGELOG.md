@@ -4,7 +4,9 @@ All notable changes to PlayerStore will be documented in this file.
 
 This project follows [Semantic Versioning](https://semver.org/).
 
-## Unreleased — breaking changes after 0.3.0
+## [0.4.0] - 2026-09-28
+
+Breaking changes from 0.3.0:
 
 - `setMany` / `trySetMany` reject duplicate and ancestor/descendant paths. Submit one complete parent replacement or disjoint leaf updates.
 - Tracked writes copy submitted tables; input mutation and shared references no longer affect stored values. Reads still borrow live tables. Failed batches roll back earlier writes even when a destination is frozen.
@@ -17,7 +19,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 - `onSave` returns a disconnect function. Store `Destroy` is terminal and disconnects hooks before release; settle game buffers first.
 - Lune tests now exercise production modules and return a failing exit status. Studio integration uses ProfileStore.Mock and fails when required companion scripts are missing.
 
-No release tag is created by this change. Review and test consumers before publishing the next version.
+Review the upgrade requirements above and test each consumer before adopting v0.4.0.
 
 ## [0.3.0] - 2026-08-17
 
