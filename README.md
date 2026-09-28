@@ -1,210 +1,130 @@
 # PlayerStore
 
-Schema-driven player data management for Roblox. Wraps [ProfileStore](https://madstudioroblox.github.io/ProfileStore/) with reactive change tracking, automatic server-to-client replication, migrations, and structural validation.
+Player data for Roblox: [ProfileStore](https://madstudioroblox.github.io/ProfileStore/) sessions with schema defaults, migrations, observable writes and private-field filtering for replication. Games supply ProfileStore and own when players load and unload.
 
-## Installation
+## Install
 
-```bash
+Install a tagged release with pesde. When testing an unreleased branch, pin its reviewed commit instead; this branch's breaking changes are listed in [CHANGELOG.md](CHANGELOG.md).
+
+```sh
 pesde add gh#daireb/PlayerStore#v0.3.0
 pesde install
 ```
 
-## Quick Start
+## Start here
 
-### 1. Define your schema (shared)
-
-Create a module in a shared location (e.g. `ReplicatedStorage`) so both server and client can require it:
+Define a shared schema. `map` allows dynamic keys; `private` excludes an entire **root field** from client data. A shared schema's defaults are visible to clients, so never put secrets in them.
 
 ```lua
--- shared/DataSchema.luau
 local PlayerStore = require(path.to.PlayerStore)
 
-local schema = PlayerStore.schema
-local map = PlayerStore.map
-local private = PlayerStore.private
-
-return schema {
-    Resources = {
-        Cash = 0,
-        XP = 0,
-    },
-
-    Stats = {
-        HighestTierReached = 0,
-        TotalWins = 0,
-    },
-
-    Inventory = map {} :: { [string]: number },
-    SelectedSlot = "Default",
-
-    Settings = private {
-        MusicVolume = 0.75,
-        ShowTutorial = true,
-    },
+return PlayerStore.schema {
+    Coins = 0,
+    Settings = { MusicEnabled = true },
+    Inventory = PlayerStore.map {} :: { [string]: number },
+    Receipts = PlayerStore.private(PlayerStore.map {}),
 }
 ```
 
-### 2. Set up the server
+Create one server store per `storeId` and one client store for that store. Use a separate store ID for development data.
 
 ```lua
--- server/DataService.luau
-local PlayerStore = require(path.to.PlayerStore)
-local DataSchema = require(path.to.DataSchema)
-local ProfileStore = require(path.to.ProfileStore)
 local Players = game:GetService("Players")
-
-local ServerData = PlayerStore.createServerStore {
+local store = PlayerStore.createServerStore {
     schema = DataSchema,
-    storeId = "PlayerData_Production",
+    storeId = "PlayerData_Dev",
     profileStore = ProfileStore,
 }
 
 Players.PlayerAdded:Connect(function(player)
-    ServerData:loadAsync(player)
+    store:loadAsync(player)
 end)
-
 Players.PlayerRemoving:Connect(function(player)
-    ServerData:unloadAsync(player)
+    -- Settle game-owned buffers before releasing the profile.
+    store:unloadAsync(player)
 end)
-
 for _, player in Players:GetPlayers() do
-    task.spawn(ServerData.loadAsync, ServerData, player)
-end
-
-local function addCash(player: Player, amount: number)
-    local data = ServerData:getData(player)
-    if data then
-        ServerData:trySet(player, "Resources/Cash", data.Resources.Cash + amount)
-    end
+    task.spawn(store.loadAsync, store, player)
 end
 ```
 
-### 3. Set up the client
-
 ```lua
--- client/DataController.luau
-local PlayerStore = require(path.to.PlayerStore)
-local DataSchema = require(path.to.DataSchema)
-
-local ClientData = PlayerStore.createClientStore {
+local data = PlayerStore.createClientStore {
     schema = DataSchema,
-    storeId = "PlayerData_Production",
+    storeId = "PlayerData_Dev",
 }
-
-ClientData:waitUntilLoaded()
-
--- Read current values:
-local cash = ClientData:get("Resources/Cash")
-
--- Listen for changes:
-ClientData:listen("Resources/Cash", function(value)
-    print("Cash is now", value)
+if not data:waitUntilLoaded() then
+    return -- Show the game's loading failure state.
+end
+local disconnect = data:bind("Coins", function(coins)
+    print(coins)
 end)
+-- Disconnect when this view closes; destroy the store only when its owner ends.
 ```
 
-## Schema
+## Read and write
 
-The schema defines your data structure with default values. It's a plain Luau table with two optional markers:
-
-- **`map {}`** -- Dynamic keys. Skips structural validation since keys aren't known ahead of time.
-- **`private {}`** -- Server-only. Never sent to the client.
-
-Everything else is strictly validated on load -- every key in the schema must exist in the player's data with the correct type.
-
-`private()` fields must be declared at the schema root. A top-level private table can contain any nested server-only structure. Nested private markers inside otherwise replicated tables are rejected when the schema is created.
-
-When composing markers, use parentheses as in `private(map {})`.
-
-> Note: Stylua users should set `call_parentheses = "Input"` in `stylua.toml`
-
-## Server usage
-
-`getData(player)` returns the typed profile table for reads. Use `observe(player)` for writes so changes are validated, observed, and replicated.
-
-### Write validation
-
-All writes through `observe():set()` and `observe():setMany()` are automatically validated against the schema. Invalid paths and type mismatches error immediately:
+`getData(player)`, `observe(player):get()` and client `get()` return **borrowed live tables**. Read them; do not mutate them. Clone any branch you need to edit, then submit it through a tracked write. Mutating a borrowed or previously submitted table bypasses validation, notifications and replication.
 
 ```lua
-obs:set("Resources/Cash", 100)       -- ok
-obs:set("Resources/Cash", "wrong")   -- errors: type mismatch
-obs:set("Fake/Path", 5)              -- errors: invalid path
-obs:set("Inventory/Sword", 3)        -- ok (map path, any key allowed)
-```
-
-Replacing a fixed-structure table validates its complete subtree. Dynamic `map()` contents skip deep validation.
-
-### Atomic batch writes
-
-Use `setMany()` when related values must change together. It validates the complete batch before writing and rolls back if any path cannot be applied. `trySet` and `trySetMany` do the same work and return `(true, nil)` or `(false, error)` instead of raising, including `"Data not loaded"` when the profile is missing. An empty `trySetMany` is a successful no-op.
-
-```lua
-local function tryBuySword(player)
-    local data = ServerData:getData(player)
-    if not data then
-        return false, "Data not loaded"
-    end
-
-    if data.Resources.Cash < 100 then
-        return false, "Not enough cash"
-    end
-
-    return ServerData:trySetMany(player, {
-        { path = "Resources/Cash", value = data.Resources.Cash - 100 },
+local data = store:getData(player)
+if data and data.Coins >= 100 then
+    local ok, err = store:trySetMany(player, {
+        { path = "Coins", value = data.Coins - 100 },
         { path = "Inventory/Sword", value = (data.Inventory.Sword or 0) + 1 },
     })
 end
 ```
 
-All writes are applied before listeners run. Each affected root, ancestor, or leaf listener fires once with the final state, and the batch is sent to the client in one replication event so client listeners also avoid intermediate states. The ordered form supports deleting dynamic map entries with `value = nil`.
+Keep read/check/write code synchronous. Batches commit all writes before notifying listeners or replicating; **this is in-memory atomicity, not a confirmed DataStore save**. Batch paths must be disjoint: no duplicates or ancestor/descendant pairs. Replace a parent with its complete new value instead. Use `value = nil` to delete a dynamic map entry.
 
-### Other server methods
+Paths use string keys separated by `/`. Values must be finite numbers, booleans, valid UTF-8 strings or plain acyclic tables. Tables are string dictionaries or dense arrays; replace arrays as whole values. `map` relaxes structural checks, not persistence checks. Fixed fields retain their declared types. `_DataVersion` is reserved.
 
-- `trySet(player, path, value)` and `trySetMany(player, updates)` return `(boolean, string?)` instead of raising.
-- `waitForData(player, timeout?)` waits for a profile and returns its typed data.
-- `onSave(callback)` registers work to run before ProfileStore saves.
-- `wipeData(player)` resets the profile to schema defaults.
-- `onSessionEnd(callback)` overrides the default behavior of kicking when a session ends.
+## API
 
-## Client usage
+### Server
 
-The client store is read-only and receives updates automatically.
+| Method | Contract |
+| --- | --- |
+| `loadAsync(player)` | Returns success; loads, migrates, reconciles and validates before exposing data. Failed loads kick by default. Concurrent calls share ownership. |
+| `unloadAsync(player)` | Cancels a pending load or starts session release. Does not wait for a save confirmation. |
+| `getData(player)` / `observe(player)` | Returns data / writable observable only while this store owns an active session; otherwise `nil`. |
+| `trySet(player, path, value)` / `trySetMany(player, updates)` | Returns `(boolean, error?)`. An empty batch is a successful no-op. Observable `set` / `setMany` raises on invalid writes. |
+| `waitForData(player, timeout?)` | Returns data or `nil` on timeout, failed load, departure, unload or destruction. Default: 30 seconds. |
+| `confirmSavedAsync(player, predicate, timeout?)` | Returns `(boolean, error?)` after checking **LastSavedData**, requesting a save if needed. Default: 15 seconds. Predicate must be synchronous, read-only and true only for the persisted state you need. |
+| `onSave(callback)` | Registers `(player, data)` before ProfileStore saves; returns a disconnect function. Synchronous hooks may update save-only metadata directly; these changes are not validated or replicated. Settle gameplay through tracked writes before unloading. |
+| `onSessionEnd(callback)` | Replaces the kick handler for unexpected session loss. Explicit unload does not call it. |
+| `wipeData(player)` | Resets schema fields and kicks the player; the game's removal handler releases the profile. |
+| `Destroy()` | Cancels loads, disconnects callbacks, releases sessions and destroys the remote. Final save uses committed data; settle game buffers first. Idempotent. |
 
-- `get(path?)` reads one path or the full data table.
-- `listen(path?, callback)` reacts to future changes and returns a disconnect function.
-- `bind(path?, callback)` behaves like `listen` but also fires immediately.
-- `waitUntilLoaded()` waits for the initial server data; `isLoaded()` checks without yielding.
+Use save confirmation for a specific durable marker when required; ordinary writes rely on ProfileStore's autosave. A timeout does not undo a write or prove it was lost. Receipt deduplication, granting policy and retries belong to the game.
 
-Listeners are hierarchical: they react to changes at their exact path, below it, or above it. If replacing an ancestor removes the listened-to value, the callback receives `nil`.
+### Client and observation
 
-Call `waitUntilLoaded()` before reading real player data. Until then, `get()` and `bind()` use schema defaults.
+- `get(path?)`: current value; before loading this is schema defaults.
+- `listen(path?, callback)`: future changes; returns a disconnect function.
+- `bind(path?, callback)`: subscribes and also invokes the callback with the current value.
+- `waitUntilLoaded(timeout?)`: returns readiness, default 30 seconds; `isLoaded()` checks immediately.
+- `Destroy()`: disconnects replication and wakes pending waits with `false`.
+
+Server observables have the same read/listen/bind methods. Listeners react to writes above, at or below their path; ancestor replacement may notify a descendant with `nil`. Callback arguments are `(value, path, changedValue, changedPath, batch?)`. Keep callbacks short and non-yielding; this is a change notification API, not an immutable event log.
 
 ## Migrations
 
-Migrations transform existing player data when your schema changes. Provide them as an ordered list of functions -- the version is the index:
+Pass `migrations = { function(data) ... end, ... }` to the server constructor. Each index is a version; append migrations, never reorder them. Keep them deterministic and local to the supplied table.
 
-```lua
-local ServerData = PlayerStore.createServerStore {
-    schema = DataSchema,
-    storeId = "PlayerData_Production",
-    profileStore = ProfileStore,
-    migrations = {
-        function(data) -- 1
-            data.Stats.TotalWins = data.Stats.TotalWins or 0
-        end,
-        function(data) -- 2
-            data.Inventory = data.Inventory or {}
-        end,
-    },
-}
+Existing profiles run missing migrations on an isolated copy **before** missing schema defaults are filled. The candidate is installed only after validation. New profiles start at the latest version without historical migrations. Missing version means legacy version zero; malformed or future versions fail closed. Adding defaults alone needs no migration; renames and changes of meaning do.
+
+## Development
+
+```sh
+lune run test                 # actual modules, controlled persistence/network boundary
+stylua --check src tests .lune
+selene src tests
+pesde install --locked        # ProfileStore dependency for engine integration
+rojo build test.project.json -o PlayerStoreTests.rbxl
 ```
 
-- New players start at the latest version (no migrations run).
-- Existing players run all migrations from their current version forward.
-- Every loaded profile is validated against the schema. If validation fails, the player is kicked.
-- Never reorder or remove migrations. Always append new ones to the end.
-- Migrations should be idempotent -- check before overwriting.
+Open the built place in Studio and Play. Server and client suites use the installed **ProfileStore.Mock**; no cloud data is written. Check both suite summaries. Lune covers failure cases quickly; Studio verifies engine events, replication and the real ProfileStore API. Mock tests do not establish live DataStore availability or cross-server locking.
 
-## License
-
-MIT
+See [ARCHITECTURE.md](ARCHITECTURE.md) for ownership and implementation decisions. MIT licensed.
