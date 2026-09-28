@@ -34,20 +34,18 @@ t:test("createClientStore returns store object", function()
 	t:expectNotNil(clientStore.isLoaded, "has isLoaded")
 end)
 
-t:test("isLoaded is false before data arrives", function()
-	-- This may already be true if the server was fast, so this is best-effort
-	-- The main value is testing the API exists and returns a boolean
+t:test("isLoaded reports readiness", function()
 	local loaded = clientStore:isLoaded()
 	t:expectEqual(typeof(loaded), "boolean", "isLoaded returns boolean")
 end)
 
 t:test("waitUntilLoaded yields and then returns", function()
-	clientStore:waitUntilLoaded()
+	t:expect(clientStore:waitUntilLoaded(), "initial snapshot received")
 	t:expect(clientStore:isLoaded(), "isLoaded true after wait")
 end)
 
 t:test("get() returns full data table after load", function()
-	clientStore:waitUntilLoaded()
+	t:expect(clientStore:waitUntilLoaded(), "initial snapshot received")
 
 	local data = clientStore:get()
 	t:expectNotNil(data, "root data exists")
@@ -55,7 +53,7 @@ t:test("get() returns full data table after load", function()
 end)
 
 t:test("get(path) returns values from server", function()
-	clientStore:waitUntilLoaded()
+	t:expect(clientStore:waitUntilLoaded(), "initial snapshot received")
 
 	local cash = clientStore:get("Resources/Cash")
 	t:expectNotNil(cash, "Cash exists")
@@ -66,11 +64,9 @@ t:test("get(path) returns values from server", function()
 end)
 
 t:test("private data is NOT present on client", function()
-	clientStore:waitUntilLoaded()
+	t:expect(clientStore:waitUntilLoaded(), "initial snapshot received")
 
 	local settings = clientStore:get("Settings")
-	-- Settings should either be nil or an empty table from the template
-	-- Since we exclude private paths from client template, it should be nil
 	t:expectNil(settings, "Settings not replicated to client")
 
 	local codes = clientStore:get("Codes")
@@ -78,7 +74,7 @@ t:test("private data is NOT present on client", function()
 end)
 
 t:test("listen fires when server changes data", function()
-	clientStore:waitUntilLoaded()
+	t:expect(clientStore:waitUntilLoaded(), "initial snapshot received")
 
 	local receivedValue = nil
 	local disconnect = clientStore:listen("Resources/Cash", function(value)
@@ -98,15 +94,14 @@ t:test("listen fires when server changes data", function()
 
 		t:expectEqual(receivedValue, 12345, "received cash update from server")
 	else
-		-- If no signal remote, skip this test gracefully
-		t:expect(true, "skipped: server signal remote not found")
+		t:expect(false, "server signal remote not found")
 	end
 
 	disconnect()
 end)
 
 t:test("setMany replication is observed atomically", function()
-	clientStore:waitUntilLoaded()
+	t:expect(clientStore:waitUntilLoaded(), "initial snapshot received")
 
 	local cashValue = nil
 	local xpSeenByCashListener = nil
@@ -135,7 +130,7 @@ t:test("setMany replication is observed atomically", function()
 		t:expectEqual(xpSeenByCashListener, 13579, "listener saw final XP from same batch")
 		t:expectEqual(rootFireCount, 1, "root listener fired once for batch")
 	else
-		t:expect(true, "skipped: server signal remote not found")
+		t:expect(false, "server signal remote not found")
 	end
 
 	disconnectCash()
@@ -143,7 +138,7 @@ t:test("setMany replication is observed atomically", function()
 end)
 
 t:test("bind fires immediately with current value", function()
-	clientStore:waitUntilLoaded()
+	t:expect(clientStore:waitUntilLoaded(), "initial snapshot received")
 
 	local receivedValue = nil
 	local disconnect = clientStore:bind("SelectedSlot", function(value)
@@ -158,7 +153,7 @@ t:test("bind fires immediately with current value", function()
 end)
 
 t:test("root listen fires on any change", function()
-	clientStore:waitUntilLoaded()
+	t:expect(clientStore:waitUntilLoaded(), "initial snapshot received")
 
 	local fireCount = 0
 	local disconnect = clientStore:listen(function()
@@ -176,10 +171,12 @@ t:test("root listen fires on any change", function()
 
 		t:expect(fireCount > 0, "root listener fired")
 	else
-		t:expect(true, "skipped: server signal remote not found")
+		t:expect(false, "server signal remote not found")
 	end
 
 	disconnect()
 end)
 
-t:run()
+local _, failed = t:run()
+clientStore:Destroy()
+assert(failed == 0, "ClientStore integration failed")

@@ -1,8 +1,6 @@
 --[=[
-	Integration tests for ServerStore with a real ProfileStore.
-	Requires Studio with API services enabled.
-
-	Uses a randomized storeId to avoid conflicts with real data.
+	Engine integration with the installed ProfileStore in-memory mock.
+	Exercises its actual events and save lifecycle without writing cloud data.
 ]=]
 
 local Players = game:GetService("Players")
@@ -16,6 +14,12 @@ local TestRunner = require(ReplicatedStorage.Tests.Shared.TestRunner)
 
 local t = TestRunner.new("ServerStore Integration")
 
+local MockProfileStore = {
+	New = function(storeId, template)
+		return ProfileStore.New(storeId, template).Mock
+	end,
+}
+local stores = {}
 local TEST_STORE_ID = `PlayerStoreTest_{math.random(100000, 999999)}`
 
 -- Wait for local player in Studio
@@ -29,10 +33,11 @@ local function createTestStore(storeIdSuffix: string, migrations: any?)
 	local store = PlayerStore.createServerStore {
 		schema = TestSchema,
 		storeId = `{TEST_STORE_ID}_{storeIdSuffix}`,
-		profileStore = ProfileStore,
+		profileStore = MockProfileStore,
 		migrations = migrations,
 	}
 	store:onSessionEnd(function() end)
+	table.insert(stores, store)
 	return store
 end
 
@@ -270,7 +275,7 @@ end)
 -- Migrations
 --------------------------------------------------------------------------------
 
-t:test("migrations run on load", function()
+t:test("new profiles skip historical migrations", function()
 	local migrationRan = false
 
 	local store = createTestStore("migrate", {
@@ -284,6 +289,8 @@ t:test("migrations run on load", function()
 
 	local data = store:getData(player)
 	t:expectNotNil(data, "data loaded")
+	t:expect(not migrationRan, "fresh data already has current shape")
+	t:expectEqual(data._DataVersion, 1, "new profile starts at latest version")
 
 	store:unloadAsync(player)
 end)
@@ -300,6 +307,7 @@ t:test("current-version profiles are still validated", function()
 	local profile = {
 		Data = {
 			_DataVersion = 0,
+			Resources = { Cash = "invalid", XP = 0 },
 		},
 	}
 
@@ -314,7 +322,7 @@ end)
 --------------------------------------------------------------------------------
 
 t:test("createServerStore creates a RemoteEvent", function()
-	local store = createTestStore("remote")
+	createTestStore("remote")
 	local storeId = `{TEST_STORE_ID}_remote`
 
 	local remote = ReplicatedStorage:FindFirstChild(`__PlayerStore_{storeId}`)
@@ -337,4 +345,22 @@ t:test("onSave registers callback", function()
 	t:expect(not callbackRegistered, "callback not called until save")
 end)
 
-t:run()
+t:test("confirmed save survives unload and reload using ProfileStore Mock", function()
+	local store = createTestStore("durable")
+	t:expect(store:loadAsync(player))
+	t:expect(store:trySet(player, "Resources/Cash", 4321))
+	local confirmed, err = store:confirmSavedAsync(player, function(data)
+		return data.Resources.Cash == 4321
+	end, 10)
+	t:expect(confirmed, err)
+	store:unloadAsync(player)
+	t:expect(store:loadAsync(player), "reload succeeds after release")
+	t:expectEqual(store:getData(player).Resources.Cash, 4321, "persisted value reloaded")
+	store:unloadAsync(player)
+end)
+
+local _, failed = t:run()
+for _, store in stores do
+	store:Destroy()
+end
+assert(failed == 0, "ServerStore integration failed")

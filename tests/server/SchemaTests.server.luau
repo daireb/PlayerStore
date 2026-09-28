@@ -160,6 +160,32 @@ t:test("freezing marker defaults does not freeze caller tables", function()
 	t:expectEqual(s.template.Settings.Nested.Value, 1, "schema owns an isolated default clone")
 end)
 
+t:test("schema rejects unsafe and cyclic defaults", function()
+	t:expectError(function()
+		schema { Bad = math.huge }
+	end, "infinite number rejected")
+	t:expectError(function()
+		schema { Bad = function() end }
+	end, "function rejected")
+	local cyclic = {}
+	cyclic.self = cyclic
+	t:expectError(function()
+		schema { Bad = cyclic }
+	end, "cycle rejected before cloning")
+	t:expectError(function()
+		schema { ["Bad/Key"] = 1 }
+	end, "slash in schema key rejected")
+end)
+
+t:test("schema rejects reserved version and array roots", function()
+	t:expectError(function()
+		schema { _DataVersion = 0 }
+	end, "version field is library-owned")
+	t:expectError(function()
+		schema { "A", "B" }
+	end, "root must use named fields")
+end)
+
 t:test("nested paths are tracked correctly", function()
 	local s = schema {
 		Player = {

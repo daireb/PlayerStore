@@ -58,7 +58,7 @@ t:test("set() updates value in underlying table", function()
 end)
 
 t:test("set() updates nested value", function()
-	local data = { Resources = { Cash = 0 } }
+	local data: any = { Resources = { Cash = 0 } }
 	local obs = ObservableTable.wrap(data)
 
 	obs:set("Resources/Cash", 999)
@@ -102,20 +102,19 @@ end)
 -- setMany()
 --------------------------------------------------------------------------------
 
-t:test("setMany() applies ordered writes", function()
-	local data = { Resources = { Cash = 100, XP = 0 }, Inventory = {} }
+t:test("setMany() applies disjoint writes", function()
+	local data: any = { Resources = { Cash = 100, XP = 0 }, Inventory = {} }
 	local obs = ObservableTable.wrap(data)
 
 	obs:setMany({
 		{ path = "Resources/Cash", value = 25 },
 		{ path = "Resources/XP", value = 50 },
-		{ path = "Inventory/Sword", value = {} },
-		{ path = "Inventory/Sword/Level", value = 2 },
+		{ path = "Inventory/Sword", value = { Level = 2 } },
 	})
 
 	t:expectEqual(data.Resources.Cash, 25, "Cash updated")
 	t:expectEqual(data.Resources.XP, 50, "XP updated")
-	t:expectEqual(data.Inventory.Sword.Level, 2, "later write sees earlier parent write")
+	t:expectEqual(data.Inventory.Sword.Level, 2, "complete item assigned")
 end)
 
 t:test("setMany() supports nil deletion", function()
@@ -152,7 +151,7 @@ t:test("setMany() validates every write before mutation", function()
 end)
 
 t:test("setMany() rolls back on path failure", function()
-	local data = { Resources = { Cash = 0 } }
+	local data: any = { Resources = { Cash = 0 } }
 	local obs = ObservableTable.wrap(data)
 
 	t:expectError(function()
@@ -199,7 +198,6 @@ t:test("setMany() notifies affected paths once with final state", function()
 
 	obs:setMany({
 		{ path = "Resources/Cash", value = 100 },
-		{ path = "Resources/XP", value = 25 },
 		{ path = "Resources/XP", value = 50 },
 	})
 	task.wait()
@@ -207,11 +205,11 @@ t:test("setMany() notifies affected paths once with final state", function()
 	t:expectEqual(rootCount, 1, "root listener fired once")
 	t:expectEqual(resourcesCount, 1, "ancestor listener fired once")
 	t:expectEqual(cashCount, 1, "Cash listener fired once")
-	t:expectEqual(xpCount, 1, "duplicate XP writes coalesced")
+	t:expectEqual(xpCount, 1, "XP listener fired once")
 	t:expectEqual(nameCount, 0, "unaffected listener did not fire")
 	t:expect(sawFinalState, "listener observed all final values")
 	t:expectEqual(lastSpecificPath, "Resources/XP", "last relevant write provided")
-	t:expectEqual(batchSize, 3, "full batch metadata provided")
+	t:expectEqual(batchSize, 2, "full batch metadata provided")
 end)
 
 t:test("setMany() parent replacement notifies descendant once", function()
@@ -231,12 +229,81 @@ t:test("setMany() parent replacement notifies descendant once", function()
 
 	obs:setMany({
 		{ path = "Items", value = { gems = 20 } },
-		{ path = "Items/gems", value = 30 },
 	})
 	task.wait()
 
 	t:expectEqual(fireCount, 1, "removed descendant listener fired once")
 	t:expectNil(receivedValue, "removed descendant received final nil value")
+end)
+
+t:test("setMany() rejects duplicate and ancestor paths before mutation", function()
+	local data = { Items = { gold = 1 }, Cash = 0 }
+	local obs = ObservableTable.wrap(data)
+	t:expectError(function()
+		obs:setMany({ { path = "Cash", value = 1 }, { path = "Cash", value = 2 } })
+	end, "duplicate paths rejected")
+	t:expectError(function()
+		obs:setMany({ { path = "Items", value = { gold = 2 } }, { path = "Items/gold", value = 3 } })
+	end, "ancestor paths rejected")
+	t:expectEqual(data.Cash, 0, "duplicate batch did not mutate")
+	t:expectEqual(data.Items.gold, 1, "ancestor batch did not mutate")
+end)
+
+t:test("setMany() rejects malformed paths", function()
+	local obs = ObservableTable.wrap({ Cash = 0 })
+	for _, path in { "", "/Cash", "Cash/", "Cash//X" } do
+		t:expectError(function()
+			obs:setMany({ { path = path, value = 1 } })
+		end, "malformed path rejected")
+	end
+end)
+
+t:test("writes cannot add string keys inside a dense array", function()
+	local data: any = { Cash = 0, Inventory = { Swords = { "A", "B" } } }
+	local obs = ObservableTable.wrap(data)
+	t:expectError(function()
+		obs:set("Inventory/Swords/Name", "mixed")
+	end, "single write rejected")
+	t:expectError(function()
+		obs:setMany({ { path = "Cash", value = 1 }, { path = "Inventory/Swords/Name", value = "mixed" } })
+	end, "batch write rejected")
+	t:expectEqual(data.Cash, 0, "batch rolled back")
+	t:expectNil(data.Inventory.Swords.Name, "array remains dense")
+end)
+
+t:test("validated writes reject cycles formed through borrowed tables", function()
+	local testSchema = PlayerStore.schema { Inventory = PlayerStore.map {} }
+	local data: any = { Inventory = { A = {}, B = {} } }
+	local obs = ObservableTable.wrap(data, function(path, value)
+		return Validation.validateWrite(testSchema, path, value)
+	end)
+	t:expectError(function()
+		obs:set("Inventory/self", data.Inventory)
+	end, "parent alias rejected after attachment")
+	t:expectNil(data.Inventory.self, "single write rolled back")
+	t:expectError(function()
+		obs:setMany({
+			{ path = "Inventory/A/Ref", value = data.Inventory.B },
+			{ path = "Inventory/B/Ref", value = data.Inventory.A },
+		})
+	end, "cross-write cycle rejected")
+	t:expectNil(data.Inventory.A.Ref, "first batch assignment rolled back")
+	t:expectNil(data.Inventory.B.Ref, "second batch assignment rolled back")
+end)
+
+t:test("commit hook runs before listeners and once per batch", function()
+	local events = {}
+	local obs = ObservableTable.wrap({ Cash = 0, XP = 0 }, nil, function(path, _value, updates)
+		table.insert(events, if updates then "batch" else path)
+	end)
+	obs:listen(function()
+		t:expect(#events >= 1, "commit hook ran before listener")
+	end)
+	obs:set("Cash", 1)
+	obs:setMany({ { path = "Cash", value = 2 }, { path = "XP", value = 3 } })
+	task.wait()
+	t:expectEqual(events[1], "Cash", "single hook ran")
+	t:expectEqual(events[2], "batch", "batch hook ran once")
 end)
 
 --------------------------------------------------------------------------------
@@ -336,6 +403,21 @@ t:test("disconnect function stops listener", function()
 	t:expectEqual(fireCount, 1, "did not fire after disconnect")
 end)
 
+t:test("disconnect during dispatch skips later listener", function()
+	local obs = ObservableTable.wrap({ Cash = 0 })
+	local called = false
+	local disconnectLater
+	obs:listen("Cash", function()
+		disconnectLater()
+	end)
+	disconnectLater = obs:listen("Cash", function()
+		called = true
+	end)
+	obs:set("Cash", 1)
+	task.wait()
+	t:expect(not called, "later callback was cancelled")
+end)
+
 t:test("listener paths share observer trie ancestors", function()
 	local obs = ObservableTable.wrap({
 		Items = {
@@ -389,13 +471,21 @@ end)
 -- applyUpdate()
 --------------------------------------------------------------------------------
 
-t:test("applyUpdate with root path merges data", function()
+t:test("applyUpdate with root path replaces data", function()
 	local obs = ObservableTable.wrap({ Cash = 0, XP = 0 })
 
 	obs:applyUpdate("", { Cash = 100, XP = 50 })
 
 	t:expectEqual(obs:get("Cash"), 100, "Cash updated")
 	t:expectEqual(obs:get("XP"), 50, "XP updated")
+end)
+
+t:test("applyUpdate root snapshot clears omitted keys", function()
+	local data = { Cash = 0, Old = 1 }
+	local obs = ObservableTable.wrap(data)
+	obs:applyUpdate("", { Cash = 100 })
+	t:expectEqual(obs:get(), data, "root identity remains stable")
+	t:expectNil(data.Old, "omitted key removed")
 end)
 
 t:test("applyUpdate with sub-path creates intermediates", function()
@@ -522,13 +612,13 @@ t:test("applyUpdates creates intermediates and notifies after all writes", funct
 end)
 
 t:test("applyUpdates rolls back created intermediates on failure", function()
-	local data = {}
+	local data: any = { Other = 5 }
 	local obs = ObservableTable.wrap(data)
 
 	t:expectError(function()
 		obs:applyUpdates({
 			{ path = "Inventory/Sword", value = 1 },
-			{ path = "Inventory/Sword/Level", value = 2 },
+			{ path = "Other/Deep", value = 2 },
 		})
 	end, "invalid ordered update should error")
 
