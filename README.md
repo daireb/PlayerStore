@@ -129,6 +129,8 @@ pesde install --locked        # ProfileStore dependency for engine integration
 rojo build test.project.json -o PlayerStoreTests.rbxl
 ```
 
+Pull requests run the same Lune suite in [GitHub Actions](.github/workflows/tests.yml); it needs no Roblox credentials or package installation.
+
 Open the built place in Studio and Play. Server and client suites use the installed **ProfileStore.Mock**; no cloud data is written. Check both suite summaries. Lune covers failure cases quickly; Studio verifies engine events, replication and the real ProfileStore API. Mock tests do not establish live DataStore availability or cross-server locking.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for ownership and implementation decisions. MIT licensed.
