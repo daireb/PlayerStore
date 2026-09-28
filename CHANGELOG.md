@@ -4,6 +4,14 @@ All notable changes to PlayerStore will be documented in this file.
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-09-29
+
+### Fixed
+
+- Increase the server session-acquisition deadline and default `waitForData` timeout from 30 to 120 seconds, matching ProfileStore's default timeout and allowing its stale-session recovery to complete after a server crash. Departure, unload and destruction still cancel pending loads; explicit wait timeouts are unchanged.
+
+Client `waitUntilLoaded` still defaults to 30 seconds. A later snapshot can complete loading after that wait times out.
+
 ## [0.4.0] - 2026-09-28
 
 Breaking changes from 0.3.0:
