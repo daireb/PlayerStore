@@ -144,6 +144,15 @@ t:test("map path still checks existence and type", function()
 	t:expect(not ok2, "wrong type for map field still fails")
 end)
 
+t:test("load validation rejects unsafe data in map and extra keys", function()
+	local template = { Inventory = {} }
+	local mapPaths = { Inventory = true }
+	local ok = validate({ Inventory = { Sword = function() end } }, template, mapPaths)
+	t:expect(not ok, "unsafe map value rejected on load")
+	ok = validate({ Inventory = {}, Extra = math.huge }, template, mapPaths)
+	t:expect(not ok, "unsafe extra value rejected on load")
+end)
+
 t:test("nested map path skips deep validation", function()
 	local template = { Player = { Garage = { Vehicles = {} } } }
 	local mapPaths = { ["Player/Garage/Vehicles"] = true }
@@ -165,6 +174,11 @@ t:test("_DataVersion in template is ignored", function()
 	local ok, err = validate(data, template, {})
 	t:expect(ok, "should pass — _DataVersion skipped")
 	t:expectNil(err, "no error")
+end)
+
+t:test("nested _DataVersion is validated like an ordinary field", function()
+	local ok = validate({ Stats = {} }, { Stats = { _DataVersion = 1 } }, {})
+	t:expect(not ok, "nested field cannot bypass validation")
 end)
 
 --------------------------------------------------------------------------------
@@ -264,6 +278,45 @@ t:test("validateWrite allows any key inside a map path", function()
 	local ok, err = Validation.validateWrite(testSchema, "Inventory/Sword", 3)
 	t:expect(ok, "should pass — map path allows any key")
 	t:expectNil(err, "no error")
+end)
+
+t:test("validateWrite rejects unserializable map contents", function()
+	for _, value in { function() end, math.huge, 0 / 0 } do
+		local ok = Validation.validateWrite(testSchema, "Inventory/Sword", value)
+		t:expect(not ok, "unsafe map value rejected")
+	end
+	local cyclic = {}
+	cyclic.self = cyclic
+	local ok = Validation.validateWrite(testSchema, "Inventory/Sword", cyclic)
+	t:expect(not ok, "cycle rejected")
+end)
+
+t:test("validateWrite rejects extra invalid fields in structured replacement", function()
+	local ok = Validation.validateWrite(testSchema, "Resources", {
+		Cash = 1,
+		XP = 2,
+		Extra = function() end,
+	})
+	t:expect(not ok, "extra function rejected")
+end)
+
+t:test("validateWrite accepts dense arrays only as whole values", function()
+	local ok = Validation.validateWrite(testSchema, "Inventory/Swords", { "A", "B" })
+	t:expect(ok, "dense array accepted")
+	local sparse = { [2] = "B" }
+	ok = Validation.validateWrite(testSchema, "Inventory/Swords", sparse)
+	t:expect(not ok, "sparse array rejected")
+	ok = Validation.validateWrite(testSchema, "Inventory/Swords", { [1] = "A", Name = "mixed" })
+	t:expect(not ok, "mixed table rejected")
+	ok = Validation.validateWrite(testSchema, "Inventory/Swords", { ["Bad/Key"] = 1 })
+	t:expect(not ok, "unaddressable dictionary key rejected")
+end)
+
+t:test("validateWrite rejects malformed paths", function()
+	for _, path in { "", "/Inventory", "Inventory/", "Inventory//Sword" } do
+		local ok = Validation.validateWrite(testSchema, path, 1)
+		t:expect(not ok, "malformed path rejected")
+	end
 end)
 
 t:test("validateWrite allows setting map path itself", function()

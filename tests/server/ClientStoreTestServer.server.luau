@@ -16,7 +16,11 @@ local TEST_STORE_ID = "PlayerStoreClientTest"
 local store = PlayerStore.createServerStore {
 	schema = TestSchema,
 	storeId = TEST_STORE_ID,
-	profileStore = ProfileStore,
+	profileStore = {
+		New = function(storeId, template)
+			return ProfileStore.New(storeId, template).Mock
+		end,
+	},
 }
 store:onSessionEnd(function() end) -- disable kick for testing
 

@@ -37,7 +37,10 @@ end
 
 function TestRunner:expectEqual(actual: any, expected: any, message: string?)
 	if actual ~= expected then
-		error(`Assertion failed: {message or "values not equal"} (got {tostring(actual)}, expected {tostring(expected)})`, 2)
+		error(
+			`Assertion failed: {message or "values not equal"} (got {tostring(actual)}, expected {tostring(expected)})`,
+			2
+		)
 	end
 end
 
@@ -92,6 +95,7 @@ function TestRunner:run()
 	end
 
 	print("")
+	return passed, failed
 end
 
 return TestRunner

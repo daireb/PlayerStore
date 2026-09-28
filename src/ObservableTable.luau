@@ -11,6 +11,8 @@
 ]=]
 
 local Signal = require(script.Parent.Signal)
+local DataValue = require(script.Parent.DataValue)
+local deepClone = require(script.Parent.DeepClone)
 
 --------------------------------------------------------------------------------
 -- Types
@@ -47,6 +49,7 @@ type InternalObservableTable<T> = ObservableTable<T> & {
 	_table: T & { [string]: any },
 	_observerRoot: ObserverNode,
 	_validator: ((path: string, value: any) -> (boolean, string?))?,
+	_onCommit: ((path: string, value: any, updates: { Update }?) -> ())?,
 }
 
 --------------------------------------------------------------------------------
@@ -64,7 +67,8 @@ ObservableTable.__index = ObservableTable
 
 function ObservableTable.wrap<T>(
 	tbl: T,
-	validator: ((path: string, value: any) -> (boolean, string?))?
+	validator: ((path: string, value: any) -> (boolean, string?))?,
+	onCommit: ((path: string, value: any, updates: { Update }?) -> ())?
 ): ObservableTable<T>
 	local self = setmetatable({}, ObservableTable) :: any
 	self._table = tbl or {}
@@ -75,6 +79,7 @@ function ObservableTable.wrap<T>(
 		children = {},
 	}
 	self._validator = validator
+	self._onCommit = onCommit
 	return self
 end
 
@@ -91,6 +96,12 @@ local function notifyNode(
 end
 
 local function getOrCreateObserverNode(self: InternalObservableTable<any>, path: string): ObserverNode
+	if path ~= ROOT then
+		local ok, err = DataValue.path(path)
+		if not ok then
+			error(`[PlayerStore] Invalid observer path: {err}`)
+		end
+	end
 	local node = self._observerRoot
 	if path == ROOT then
 		return node
@@ -171,11 +182,28 @@ end
 
 local function copyUpdates(updates: { Update }): { Update }
 	local copied = {}
+	local paths = {}
 
 	for index, update in ipairs(updates) do
-		if typeof(update) ~= "table" or typeof(update.path) ~= "string" or update.path == ROOT then
-			error(`[PlayerStore] Invalid update at index {index}: expected a non-empty string path`)
+		local ok, err
+		if typeof(update) == "table" then
+			ok, err = DataValue.path(update.path)
+		else
+			ok, err = false, "expected a path/value record"
 		end
+		if not ok then
+			error(`[PlayerStore] Invalid update at index {index}: {err}`)
+		end
+		for _, prior in paths do
+			if
+				prior == update.path
+				or string.sub(prior, 1, #update.path + 1) == update.path .. "/"
+				or string.sub(update.path, 1, #prior + 1) == prior .. "/"
+			then
+				error(`[PlayerStore] Overlapping batch paths: "{prior}" and "{update.path}"`)
+			end
+		end
+		table.insert(paths, update.path)
 
 		table.insert(copied, {
 			path = update.path,
@@ -184,6 +212,18 @@ local function copyUpdates(updates: { Update }): { Update }
 	end
 
 	return copied
+end
+
+local function copyWriteValue(path: string, value: any): any
+	if typeof(value) ~= "table" then
+		return value
+	end
+	local valid, reason = DataValue.validate(value, path)
+	if not valid then
+		error(`[PlayerStore] Invalid write to "{path}": {reason}`)
+	end
+	-- Separate every submitted branch, including repeated references and frozen tables.
+	return deepClone(value)
 end
 
 local function resolveWriteTarget(
@@ -199,17 +239,20 @@ local function resolveWriteTarget(
 		if typeof(current) ~= "table" then
 			error(`Path "{path}" does not exist in the table`)
 		end
+		if current[1] ~= nil then
+			error(`Path "{path}" cannot write inside an array; replace the whole array`)
+		end
 
 		if current[keys[i]] == nil then
 			if not createIntermediates then
 				error(`Path "{path}" does not exist in the table`)
 			end
+			current[keys[i]] = {}
 			table.insert(undo, {
 				parent = current,
 				key = keys[i],
 				hadValue = false,
 			})
-			current[keys[i]] = {}
 		end
 
 		current = current[keys[i]]
@@ -217,6 +260,9 @@ local function resolveWriteTarget(
 
 	if typeof(current) ~= "table" then
 		error(`Path "{path}" does not exist in the table`)
+	end
+	if current[1] ~= nil then
+		error(`Path "{path}" cannot write inside an array; replace the whole array`)
 	end
 
 	return current, keys[#keys]
@@ -288,7 +334,12 @@ local function notifyUpdates(
 	end
 end
 
-local function commitUpdates(self: InternalObservableTable<any>, updates: { Update }, createIntermediates: boolean)
+local function commitUpdates(
+	self: InternalObservableTable<any>,
+	updates: { Update },
+	createIntermediates: boolean,
+	runCommitHook: boolean
+)
 	local undo = {}
 	local keysByUpdate = {}
 	local success, err = pcall(function()
@@ -297,13 +348,13 @@ local function commitUpdates(self: InternalObservableTable<any>, updates: { Upda
 			keysByUpdate[update] = keys
 			local parent, key = resolveWriteTarget(self, update.path, keys, createIntermediates, undo)
 			local oldValue = parent[key]
+			parent[key] = update.value
 			table.insert(undo, {
 				parent = parent,
 				key = key,
 				hadValue = oldValue ~= nil,
 				value = oldValue,
 			})
-			parent[key] = update.value
 		end
 	end)
 
@@ -315,12 +366,19 @@ local function commitUpdates(self: InternalObservableTable<any>, updates: { Upda
 		error(err, 0)
 	end
 
+	if runCommitHook and self._onCommit and #updates > 0 then
+		self._onCommit(ROOT, self._table, updates)
+	end
 	notifyUpdates(self, updates, keysByUpdate)
 end
 
 function ObservableTable.get<T>(self: InternalObservableTable<T>, path: string?): any
 	if path == nil or path == ROOT then
 		return self._table
+	end
+	local ok, err = DataValue.path(path)
+	if not ok then
+		error(`[PlayerStore] Invalid path: {err}`)
 	end
 
 	local keys = string.split(path, "/")
@@ -337,6 +395,10 @@ function ObservableTable.get<T>(self: InternalObservableTable<T>, path: string?)
 end
 
 function ObservableTable.set<T>(self: InternalObservableTable<T>, path: string, value: any)
+	local valid, pathError = DataValue.path(path)
+	if not valid then
+		error(`[PlayerStore] Invalid path: {pathError}`)
+	end
 	if self._validator then
 		local ok, err = self._validator(path, value)
 		if not ok then
@@ -344,17 +406,13 @@ function ObservableTable.set<T>(self: InternalObservableTable<T>, path: string, 
 		end
 	end
 
+	value = copyWriteValue(path, value)
 	local keys = string.split(path, "/")
-	local current: any = self._table
-
-	for i = 1, #keys - 1 do
-		if current[keys[i]] == nil then
-			error(`Path "{path}" does not exist in the table`)
-		end
-		current = current[keys[i]]
+	local current, key = resolveWriteTarget(self, path, keys, false, {})
+	current[key] = value
+	if self._onCommit then
+		self._onCommit(path, value, nil)
 	end
-
-	current[keys[#keys]] = value
 	notifyPath(self, keys, path, value, nil)
 end
 
@@ -374,8 +432,11 @@ function ObservableTable.setMany<T>(self: InternalObservableTable<T>, updates: {
 			end
 		end
 	end
+	for _, update in copiedUpdates do
+		update.value = copyWriteValue(update.path, update.value)
+	end
 
-	commitUpdates(self, copiedUpdates, false)
+	commitUpdates(self, copiedUpdates, false, true)
 end
 
 function ObservableTable.listen<T>(
@@ -418,10 +479,10 @@ function ObservableTable.bind<T>(
 		callback = maybeCallback :: Callback
 	end
 
+	local disconnect = self:listen(path, callback)
 	local val = self:get(if path == ROOT then nil else path)
 	task.spawn(callback, val, path, val, path)
-
-	return self:listen(path, callback)
+	return disconnect
 end
 
 --[=[
@@ -430,9 +491,12 @@ end
 	if they don't exist, and handles root-level updates.
 ]=]
 function ObservableTable.applyUpdate<T>(self: InternalObservableTable<T>, path: string, value: any)
-	if path == ROOT or path == "" then
-		-- Root update: merge incoming data into internal table
-		if typeof(value) == "table" then
+	if path == ROOT then
+		if typeof(value) ~= "table" then
+			error("[PlayerStore] Root snapshot must be a table")
+		end
+		if value ~= self._table then
+			table.clear(self._table :: any)
 			for k, v in value do
 				(self._table :: any)[k] = v
 			end
@@ -440,17 +504,27 @@ function ObservableTable.applyUpdate<T>(self: InternalObservableTable<T>, path: 
 		notifySubtree(self._observerRoot, self._table, ROOT, self._table, nil)
 		return
 	end
+	local valid, pathError = DataValue.path(path)
+	if not valid then
+		error(`[PlayerStore] Invalid path: {pathError}`)
+	end
 
 	local keys = string.split(path, "/")
 	local current: any = self._table
 
 	for i = 1, #keys - 1 do
+		if typeof(current) ~= "table" or current[1] ~= nil then
+			error(`Path "{path}" cannot traverse a non-dictionary table`)
+		end
 		if current[keys[i]] == nil then
 			current[keys[i]] = {}
 		end
 		current = current[keys[i]]
 	end
 
+	if typeof(current) ~= "table" or current[1] ~= nil then
+		error(`Path "{path}" cannot write inside an array or scalar`)
+	end
 	current[keys[#keys]] = value
 	notifyPath(self, keys, path, value, nil)
 end
@@ -460,7 +534,7 @@ end
 	creates missing intermediate tables and bypasses validation.
 ]=]
 function ObservableTable.applyUpdates<T>(self: InternalObservableTable<T>, updates: { Update })
-	commitUpdates(self, copyUpdates(updates), true)
+	commitUpdates(self, copyUpdates(updates), true, false)
 end
 
 local function destroyObserverNode(node: ObserverNode)

@@ -1,0 +1,37 @@
+name: Tests
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lune:
+    name: Lune tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Lune
+        env:
+          LUNE_VERSION: 0.10.5
+          LUNE_SHA256: 1fb5dee6a1afa1d300092805c6e660fe06144d29dd68c45cf6956f040667f791
+        run: |
+          curl --fail --location --retry 3 \
+            "https://github.com/lune-org/lune/releases/download/v${LUNE_VERSION}/lune-${LUNE_VERSION}-linux-x86_64.zip" \
+            --output "$RUNNER_TEMP/lune.zip"
+          echo "$LUNE_SHA256  $RUNNER_TEMP/lune.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/lune.zip" -d "$RUNNER_TEMP/lune"
+          chmod +x "$RUNNER_TEMP/lune/lune"
+          echo "$RUNNER_TEMP/lune" >> "$GITHUB_PATH"
+
+      - name: Run unit tests
+        run: lune run test
