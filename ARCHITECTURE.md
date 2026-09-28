@@ -10,15 +10,15 @@ The library stays independent of Fusion, Vide, service frameworks and a game's d
 
 ## Loading and releasing
 
-`ServerStore` serializes acquisition per user ID and binds an acquired profile to the particular Player instance. Cancellation covers departure, explicit unload, destruction and a 30-second acquisition deadline checked by ProfileStore. ProfileStore may still be waiting on a platform request when that deadline passes.
+`ServerStore` serializes acquisition per user ID and binds an acquired profile to the particular Player instance. Concurrent calls for that Player share the acquisition result, including failure or cancellation; a later call may start a new attempt. Cancellation covers departure, explicit unload, destruction and a 30-second acquisition deadline checked by ProfileStore. ProfileStore may still be waiting on a platform request when that deadline passes.
 
-Load transformations use a copy because ProfileStore can autosave while a migration yields, and releasing a failed load also saves. The sequence is: migrate saved shape → reconcile missing defaults → validate → install candidate → expose observable. Failures leave the original data untouched. Both new and already-current profiles go through reconciliation and validation.
+Load transformations use a copy because ProfileStore can autosave while a migration yields, and releasing a failed load also saves. The sequence is: migrate saved shape → normalize migration output → reconcile missing defaults → validate → install candidate → expose observable. Normalization validates persistence-safe values and copies migration output into independent mutable tables. Failures leave the original data untouched. Both new and already-current profiles go through reconciliation and validation. Reconciliation initializes absent maps but never fills entries in existing maps: a missing entry may be an intentional deletion.
 
-Public reads and writes require current ownership and `IsActive()`, including writes through cached observables. Cleanup from an old profile cannot remove a replacement. Explicit unload leaves final saving to ProfileStore; `Destroy` disconnects all hooks and is terminal. Neither method claims durable completion.
+Store lookups and tracked writes require current ownership and `IsActive()`, including writes through cached observables. Previously borrowed tables or cached observable reads are not proof of an active session. Cleanup from an old profile cannot remove a replacement. Explicit unload leaves final saving to ProfileStore; `Destroy` disconnects all hooks and is terminal. Neither method claims durable completion.
 
 ## Writes and observation
 
-Data remains plain tables. Reads borrow references; submitted tables transfer mutation ownership to the store. This avoids a full-profile copy on every read/write. The tradeoff is explicit: direct table mutation is outside the tracked API and cannot be made safe by a style guide alone. Tests and game code should exercise writes through the store.
+Data remains plain tables. Reads borrow references; tracked writes validate and copy only submitted table values into independent mutable trees. This prevents shared input references from linking unrelated paths or frozen input from blocking later writes, without copying the full profile on every change. Scalar writes need no copy. Direct mutation of borrowed tables remains outside the tracked API.
 
 `Schema` resolves and freezes defaults and marker paths. `Validation` checks fixed fields against defaults; `DataValue` enforces persistence-safe values even inside dynamic maps or extra stored fields. Validation visits the changed value, not the entire profile for every scalar write.
 

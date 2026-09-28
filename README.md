@@ -64,7 +64,9 @@ end)
 
 ## Read and write
 
-`getData(player)`, `observe(player):get()` and client `get()` return **borrowed live tables**. Read them; do not mutate them. Clone any branch you need to edit, then submit it through a tracked write. Mutating a borrowed or previously submitted table bypasses validation, notifications and replication.
+`getData(player)`, `observe(player):get()` and client `get()` return **borrowed live tables**. Read them; do not mutate them. Clone any branch you need to edit, then submit it through a tracked write. Direct mutation of a borrowed table bypasses validation, notifications and replication.
+
+Tracked writes copy submitted tables into independent, mutable values. Later changes to your input do not affect the store; table identity and shared references are not preserved.
 
 ```lua
 local data = store:getData(player)
@@ -86,7 +88,7 @@ Paths use string keys separated by `/`. Values must be finite numbers, booleans,
 
 | Method | Contract |
 | --- | --- |
-| `loadAsync(player)` | Returns success; loads, migrates, reconciles and validates before exposing data. Failed loads kick by default. Concurrent calls share ownership. |
+| `loadAsync(player)` | Returns success; loads, migrates, reconciles and validates before exposing data. Failed loads kick by default. Concurrent calls for the same Player share one attempt and its result. |
 | `unloadAsync(player)` | Cancels a pending load or starts session release. Does not wait for a save confirmation. |
 | `getData(player)` / `observe(player)` | Returns data / writable observable only while this store owns an active session; otherwise `nil`. |
 | `trySet(player, path, value)` / `trySetMany(player, updates)` | Returns `(boolean, error?)`. An empty batch is a successful no-op. Observable `set` / `setMany` raises on invalid writes. |
@@ -114,6 +116,8 @@ Server observables have the same read/listen/bind methods. Listeners react to wr
 Pass `migrations = { function(data) ... end, ... }` to the server constructor. Each index is a version; append migrations, never reorder them. Keep them deterministic and local to the supplied table.
 
 Existing profiles run missing migrations on an isolated copy **before** missing schema defaults are filled. The candidate is installed only after validation. New profiles start at the latest version without historical migrations. Missing version means legacy version zero; malformed or future versions fail closed. Adding defaults alone needs no migration; renames and changes of meaning do.
+
+Existing `map` contents are preserved, including deleted default entries. Defaults initialize an entirely missing map; use a migration for an intentional grant to existing players.
 
 ## Development
 

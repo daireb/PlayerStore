@@ -7,11 +7,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 ## Unreleased — breaking changes after 0.3.0
 
 - `setMany` / `trySetMany` reject duplicate and ancestor/descendant paths. Submit one complete parent replacement or disjoint leaf updates.
+- Tracked writes copy submitted tables; input mutation and shared references no longer affect stored values. Reads still borrow live tables. Failed batches roll back earlier writes even when a destination is frozen.
 - Schemas and tracked writes reject values that cannot persist reliably: non-finite numbers, invalid UTF-8, metatables, cycles, sparse/mixed tables and non-string dictionary keys. Paths are nonempty string segments separated by `/`; arrays are whole-value replacements. `_DataVersion` is reserved.
-- Every successful load reconciles missing defaults **after** migrations. Remove consumer reconciliation wrappers; they otherwise change the shape migrations see. Malformed/future versions fail closed. Failed migrations never install partial edits.
+- Every successful load reconciles missing defaults **after** migrations. Existing maps preserve deleted entries; only absent maps receive defaults. Remove consumer reconciliation wrappers; they otherwise change the shape migrations see. Malformed/future versions fail closed. Failed migrations never install partial edits.
 - Install matching server/client versions together: clients now request their initial snapshot. Only declared public root fields replicate; move any required legacy fields into the schema.
 - Waits are bounded by default (30 seconds). Check the boolean from `waitUntilLoaded` and the optional result of `waitForData`.
-- Reads and writes refuse inactive sessions; stale Player/profile callbacks cannot affect replacement owners. Games still explicitly load and unload players.
+- Store lookups and tracked writes refuse inactive sessions; stale Player/profile callbacks cannot affect replacement owners. Concurrent loads for one Player share failure and cancellation as well as success. Games still explicitly load and unload players.
 - `confirmSavedAsync` replaces consumer access to `_profiles` for save confirmation. A successful write is not a durable acknowledgement.
 - `onSave` returns a disconnect function. Store `Destroy` is terminal and disconnects hooks before release; settle game buffers first.
 - Lune tests now exercise production modules and return a failing exit status. Studio integration uses ProfileStore.Mock and fails when required companion scripts are missing.
