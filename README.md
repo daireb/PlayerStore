@@ -88,11 +88,11 @@ Paths use string keys separated by `/`. Values must be finite numbers, booleans,
 
 | Method | Contract |
 | --- | --- |
-| `loadAsync(player)` | Returns success; loads, migrates, reconciles and validates before exposing data. Failed loads kick by default. Concurrent calls for the same Player share one attempt and its result. |
+| `loadAsync(player)` | Returns success; loads, migrates, reconciles and validates before exposing data. Acquisition has a 120-second cancellation deadline, allowing ProfileStore's stale-session recovery to finish. Failed loads kick by default. Concurrent calls for the same Player share one attempt and its result. |
 | `unloadAsync(player)` | Cancels a pending load or starts session release. Does not wait for a save confirmation. |
 | `getData(player)` / `observe(player)` | Returns data / writable observable only while this store owns an active session; otherwise `nil`. |
 | `trySet(player, path, value)` / `trySetMany(player, updates)` | Returns `(boolean, error?)`. An empty batch is a successful no-op. Observable `set` / `setMany` raises on invalid writes. |
-| `waitForData(player, timeout?)` | Returns data or `nil` on timeout, failed load, departure, unload or destruction. Default: 30 seconds. |
+| `waitForData(player, timeout?)` | Returns data or `nil` on timeout, failed load, departure, unload or destruction. Default: 120 seconds, matching the acquisition deadline. |
 | `confirmSavedAsync(player, predicate, timeout?)` | Returns `(boolean, error?)` after checking **LastSavedData**, requesting a save if needed. Default: 15 seconds. Predicate must be synchronous, read-only and true only for the persisted state you need. |
 | `onSave(callback)` | Registers `(player, data)` before ProfileStore saves; returns a disconnect function. Synchronous hooks may update save-only metadata directly; these changes are not validated or replicated. Settle gameplay through tracked writes before unloading. |
 | `onSessionEnd(callback)` | Replaces the kick handler for unexpected session loss. Explicit unload does not call it. |
@@ -106,7 +106,7 @@ Use save confirmation for a specific durable marker when required; ordinary writ
 - `get(path?)`: current value; before loading this is schema defaults.
 - `listen(path?, callback)`: future changes; returns a disconnect function.
 - `bind(path?, callback)`: subscribes and also invokes the callback with the current value.
-- `waitUntilLoaded(timeout?)`: returns readiness, default 30 seconds; `isLoaded()` checks immediately.
+- `waitUntilLoaded(timeout?)`: returns readiness, default 30 seconds; `isLoaded()` checks immediately. A timeout does not cancel replication: a later snapshot can still load while the server finishes session recovery.
 - `Destroy()`: disconnects replication and wakes pending waits with `false`.
 
 Server observables have the same read/listen/bind methods. Listeners react to writes above, at or below their path; ancestor replacement may notify a descendant with `nil`. Callback arguments are `(value, path, changedValue, changedPath, batch?)`. Keep callbacks short and non-yielding; this is a change notification API, not an immutable event log.

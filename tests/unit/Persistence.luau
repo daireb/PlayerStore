@@ -209,6 +209,136 @@ return function(Runtime, TestRunner)
 		store:Destroy()
 	end)
 
+	t:test("session acquisition can finish after ProfileStore's stale-lock recovery delay", function()
+		local world, store, player = setup()
+		local elapsed = 0
+		world.clock = function()
+			return elapsed
+		end
+		world.startHook = function()
+			-- ProfileStore 1.0.3 retries at 5, 15, 25 and 35 seconds, then steals at 45.
+			elapsed = 45
+		end
+		local loaded = store:loadAsync(player)
+		local data = store:getData(player)
+		store:Destroy()
+		t:expect(loaded, "a stale session must have time to recover")
+		t:expectNotNil(data)
+		t:expectNil(player.kicked)
+	end)
+
+	t:test("default data wait remains pending during a slow session acquisition", function()
+		local world, store, player = setup()
+		local elapsed = 0
+		world.clock = function()
+			return elapsed
+		end
+		local acquisition
+		world.startHook = function()
+			acquisition = coroutine.running()
+			coroutine.yield()
+		end
+		local loaded, data, finished
+		task.spawn(function()
+			loaded = store:loadAsync(player)
+		end)
+		task.spawn(function()
+			data = store:waitForData(player)
+			finished = true
+		end)
+		elapsed = 35
+		task.wait(0.06)
+		local pendingAfterThirty = not finished
+		elapsed = 45
+		task.spawn(acquisition)
+		task.wait(0.06)
+		store:Destroy()
+		t:expect(pendingAfterThirty, "waitForData must not abandon a recoverable acquisition")
+		t:expectEqual(loaded, true)
+		t:expectEqual(finished, true)
+		t:expectNotNil(data)
+	end)
+
+	t:test("replacement Player can wait beyond thirty seconds for the active session to release", function()
+		local world, store, old = setup()
+		local elapsed = 0
+		world.clock = function()
+			return elapsed
+		end
+		t:expect(store:loadAsync(old))
+		local player = world:player(old.UserId)
+		local loaded
+		task.spawn(function()
+			loaded = store:loadAsync(player)
+		end)
+		elapsed = 35
+		task.wait(0.06)
+		local pendingAfterThirty = loaded == nil
+		local startsBeforeRelease = world.starts
+		elapsed = 45
+		store:unloadAsync(old)
+		task.wait(0.06)
+		local data = store:getData(player)
+		store:Destroy()
+		t:expect(pendingAfterThirty)
+		t:expectEqual(startsBeforeRelease, 1, "must not acquire while the old session is active")
+		t:expectEqual(loaded, true)
+		t:expectNotNil(data)
+		t:expectEqual(world.starts, 2)
+	end)
+
+	t:test("session acquisition remains bounded by ProfileStore's default timeout", function()
+		local world, store, player = setup()
+		local elapsed = 0
+		world.clock = function()
+			return elapsed
+		end
+		local cancelledBefore, cancelledAtDeadline
+		world.startHook = function(params)
+			elapsed = 119
+			cancelledBefore = params.Cancel()
+			elapsed = 120
+			cancelledAtDeadline = params.Cancel()
+		end
+		local loaded = store:loadAsync(player)
+		store:Destroy()
+		t:expectEqual(cancelledBefore, false)
+		t:expectEqual(cancelledAtDeadline, true)
+		t:expectEqual(loaded, false)
+		t:expectNotNil(player.kicked)
+	end)
+
+	t:test("departure, unload and destruction still cancel a slow acquisition without kicking", function()
+		for _, action in { "leave", "unload", "destroy" } do
+			local world, store, player = setup()
+			local elapsed = 0
+			world.clock = function()
+				return elapsed
+			end
+			local cancelledBefore, cancelledAfter
+			world.startHook = function(params)
+				elapsed = 35
+				cancelledBefore = params.Cancel()
+				if action == "leave" then
+					player.Parent = nil
+					world.players.PlayerRemoving:Fire(player)
+				elseif action == "unload" then
+					store:unloadAsync(player)
+				else
+					store:Destroy()
+				end
+				cancelledAfter = params.Cancel()
+			end
+			local loaded = store:loadAsync(player)
+			store:Destroy()
+			t:expectEqual(cancelledBefore, false, action)
+			t:expectEqual(cancelledAfter, true, action)
+			t:expectEqual(loaded, false, action)
+			t:expectNil(player.kicked, action)
+			t:expectEqual(#world.profiles, 0, action)
+		end
+	end)
+
 	t:test("unload cancels an in-flight load without kicking", function()
 		local world, store, player = setup()
 		world.startHook = function()
