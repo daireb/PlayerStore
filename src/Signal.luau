@@ -17,16 +17,23 @@ function Signal.new()
 end
 
 function Signal:Fire(...: any)
-	for _, callback in self._callbacks do
-		task.spawn(callback, ...)
+	local callbacks = table.clone(self._callbacks)
+	for _, entry in callbacks do
+		task.spawn(function(...)
+			if entry.active then
+				entry.callback(...)
+			end
+		end, ...)
 	end
 end
 
 function Signal:Connect(callback: (...any) -> ()): () -> ()
-	table.insert(self._callbacks, callback)
+	local entry = { callback = callback, active = true }
+	table.insert(self._callbacks, entry)
 
 	return function()
-		local index = table.find(self._callbacks, callback)
+		entry.active = false
+		local index = table.find(self._callbacks, entry)
 		if index then
 			table.remove(self._callbacks, index)
 		end
@@ -34,6 +41,9 @@ function Signal:Connect(callback: (...any) -> ()): () -> ()
 end
 
 function Signal:Destroy()
+	for _, entry in self._callbacks do
+		entry.active = false
+	end
 	table.clear(self._callbacks)
 end
 

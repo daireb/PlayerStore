@@ -7,6 +7,7 @@
 ]=]
 
 local deepClone = require(script.Parent.DeepClone)
+local DataValue = require(script.Parent.DataValue)
 
 local MARKER_KEY = "__playerstore"
 
@@ -118,6 +119,16 @@ export type Schema<T> = {
 	```
 ]=]
 function Schema.schema<T>(definition: T): Schema<T>
+	if typeof(definition) ~= "table" or (definition :: any)[1] ~= nil then
+		error("[PlayerStore] Schema root must be a string-keyed table")
+	end
+	if (definition :: any)._DataVersion ~= nil then
+		error("[PlayerStore] _DataVersion is reserved for ProfileStore migrations")
+	end
+	local valid, err = DataValue.validate(definition, "schema")
+	if not valid then
+		error(`[PlayerStore] Invalid schema: {err}`)
+	end
 	local template = {}
 	local mapPaths = {}
 	local privatePaths = {}

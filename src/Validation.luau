@@ -3,6 +3,7 @@
 ]=]
 
 local Validation = {}
+local DataValue = require(script.Parent.DataValue)
 
 local DATA_VERSION_KEY = "_DataVersion"
 
@@ -13,7 +14,7 @@ local function validateDataRecursive(
 	path: string
 ): (boolean, string?)
 	for key, templateValue in template do
-		if key == DATA_VERSION_KEY then
+		if path == "" and key == DATA_VERSION_KEY then
 			continue
 		end
 
@@ -58,7 +59,10 @@ function Validation.validateData(
 	path: string?
 ): (boolean, string?)
 	debug.profilebegin("PlayerStore.Validation.validateData")
-	local success, errorPath = validateDataRecursive(data, template, mapPaths, path or "")
+	local success, errorPath = DataValue.validate(data, path or "data")
+	if success then
+		success, errorPath = validateDataRecursive(data, template, mapPaths, path or "")
+	end
 	debug.profileend()
 	return success, errorPath
 end
@@ -70,6 +74,10 @@ type Schema<T> = {
 }
 
 local function validateWriteInternal(schema: Schema<any>, path: string, value: any): (boolean, string?)
+	local validPath, pathError = DataValue.path(path)
+	if not validPath then
+		return false, pathError
+	end
 	local template = schema.template :: any
 	local keys = string.split(path, "/")
 	local current = template
@@ -81,7 +89,10 @@ local function validateWriteInternal(schema: Schema<any>, path: string, value: a
 
 		if i < #keys then
 			if schema.mapPaths[builtPath] then
-				return true, nil
+				if value == nil then
+					return true, nil
+				end
+				return DataValue.validate(value, path)
 			end
 
 			local next = current[key]
@@ -92,7 +103,10 @@ local function validateWriteInternal(schema: Schema<any>, path: string, value: a
 		else
 			local ancestor = table.concat(keys, "/", 1, #keys - 1)
 			if schema.mapPaths[ancestor] then
-				return true, nil
+				if value == nil then
+					return true, nil
+				end
+				return DataValue.validate(value, path)
 			end
 
 			local templateValue = current[key]
@@ -107,17 +121,20 @@ local function validateWriteInternal(schema: Schema<any>, path: string, value: a
 			end
 
 			if schema.mapPaths[builtPath] then
-				return true, nil
+				return DataValue.validate(value, path)
 			end
 
 			if expectedType == "table" then
 				debug.profilebegin("PlayerStore.Validation.validateWrite.deep")
-				local success, errorPath = validateDataRecursive(value, templateValue, schema.mapPaths, builtPath)
+				local success, errorPath = DataValue.validate(value, builtPath)
+				if success then
+					success, errorPath = validateDataRecursive(value, templateValue, schema.mapPaths, builtPath)
+				end
 				debug.profileend()
 				return success, errorPath
 			end
 
-			return true, nil
+			return DataValue.validate(value, builtPath)
 		end
 	end
 
