@@ -15,7 +15,8 @@ local ObservableTable = require(script.Parent.ObservableTable)
 local Validation = require(script.Parent.Validation)
 
 local DATA_VERSION_KEY = "_DataVersion"
-local DEFAULT_LOAD_WAIT = 30
+-- Match ProfileStore's default timeout so its stale-session takeover can finish.
+local DEFAULT_LOAD_WAIT = 120
 local DEFAULT_SAVE_CONFIRM_WAIT = 15
 local SNAPSHOT_COOLDOWN = 1
 

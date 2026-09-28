@@ -46,7 +46,11 @@ local function clone(value)
 end
 
 function Runtime.new()
-	local world = { queue = {}, messages = {}, warnings = {}, profiles = {}, starts = 0 }
+	local world = { queue = {}, messages = {}, warnings = {}, profiles = {}, starts = 0, clock = os.clock }
+	local osShim = table.clone(os)
+	osShim.clock = function()
+		return world.clock()
+	end
 	local players = { PlayerRemoving = Runtime.signal(), PlayerAdded = Runtime.signal() }
 	local storage = {}
 	local root = { _path = "src/init.luau" }
@@ -167,7 +171,8 @@ function Runtime.new()
 				script = module,
 				require = load,
 				task = task,
-				tick = os.clock,
+				os = osShim,
+				tick = osShim.clock,
 				debug = debugShim,
 				game = {
 					GetService = function(_, name)
