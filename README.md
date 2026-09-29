@@ -4,10 +4,10 @@ Player data for Roblox: [ProfileStore](https://madstudioroblox.github.io/Profile
 
 ## Install
 
-Install v0.4.1 with pesde. Review the breaking changes from 0.3.0 in [CHANGELOG.md](CHANGELOG.md) before upgrading.
+Install v0.4.2 with pesde. Review the breaking changes from 0.3.0 in [CHANGELOG.md](CHANGELOG.md) before upgrading.
 
 ```sh
-pesde add gh#daireb/PlayerStore#v0.4.1
+pesde add gh#daireb/PlayerStore#v0.4.2
 pesde install
 ```
 
@@ -39,8 +39,11 @@ local store = PlayerStore.createServerStore {
 Players.PlayerAdded:Connect(function(player)
     store:loadAsync(player)
 end)
+-- Settle game-owned buffers inside the release, while writes still succeed.
+store:onBeforeRelease(function(player, data)
+    -- e.g. store:trySet(player, "Stats/PlayTime", data.Stats.PlayTime + unflushedSeconds(player))
+end)
 Players.PlayerRemoving:Connect(function(player)
-    -- Settle game-owned buffers before releasing the profile.
     store:unloadAsync(player)
 end)
 for _, player in Players:GetPlayers() do
@@ -94,10 +97,11 @@ Paths use string keys separated by `/`. Values must be finite numbers, booleans,
 | `trySet(player, path, value)` / `trySetMany(player, updates)` | Returns `(boolean, error?)`. An empty batch is a successful no-op. Observable `set` / `setMany` raises on invalid writes. |
 | `waitForData(player, timeout?)` | Returns data or `nil` on timeout, failed load, departure, unload or destruction. Default: 120 seconds, matching the acquisition deadline. |
 | `confirmSavedAsync(player, predicate, timeout?)` | Returns `(boolean, error?)` after checking **LastSavedData**, requesting a save if needed. Default: 15 seconds. Predicate must be synchronous, read-only and true only for the persisted state you need. |
-| `onSave(callback)` | Registers `(player, data)` before ProfileStore saves; returns a disconnect function. Synchronous hooks may update save-only metadata directly; these changes are not validated or replicated. Settle gameplay through tracked writes before unloading. |
+| `onSave(callback)` | Registers `(player, data)` before ProfileStore saves; returns a disconnect function. Synchronous hooks may update save-only metadata directly; these changes are not validated or replicated. |
+| `onBeforeRelease(callback)` | Registers `(player, data)` to run synchronously when `unloadAsync` or `Destroy` is about to release a loaded session; returns a disconnect function. Tracked writes to that player succeed inside the hook even after the Player has left (deferred `PlayerRemoving`), so settle game-owned buffers here. Must not yield. ProfileStore-initiated releases (shutdown, session loss) do not run it; flush from `onSave` as well if those saves matter. |
 | `onSessionEnd(callback)` | Replaces the kick handler for unexpected session loss. Explicit unload does not call it. |
 | `wipeData(player)` | Resets schema fields and kicks the player; the game's removal handler releases the profile. |
-| `Destroy()` | Cancels loads, disconnects callbacks, releases sessions and destroys the remote. Final save uses committed data; settle game buffers first. Idempotent. |
+| `Destroy()` | Runs before-release hooks, then cancels loads, disconnects callbacks, releases sessions and destroys the remote. Final save uses committed data. Idempotent. |
 
 Use save confirmation for a specific durable marker when required; ordinary writes rely on ProfileStore's autosave. A timeout does not undo a write or prove it was lost. Receipt deduplication, granting policy and retries belong to the game.
 

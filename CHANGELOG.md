@@ -4,6 +4,12 @@ All notable changes to PlayerStore will be documented in this file.
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] - 2026-09-29
+
+### Added
+
+- `ServerStore:onBeforeRelease(callback)` runs synchronously inside `unloadAsync` and `Destroy`, before ownership is cleared, so games can settle buffered values into the final save. Writes to the releasing session succeed even when the Player is already unparented, which is the norm for `PlayerRemoving` handlers under deferred signal behavior. Returns a disconnect function. ProfileStore-initiated releases do not run it.
+
 ## [0.4.1] - 2026-09-29
 
 ### Fixed

@@ -4,7 +4,7 @@
 
 - **ProfileStore** owns persistence, session locks, autosave and shutdown saving. It is supplied by the consumer; PlayerStore does not install another shutdown saver.
 - **PlayerStore** owns schema validation, load transformations, tracked writes and replication to the owning client.
-- **The game** owns load/unload ordering, economy rules, receipt handling, UI bindings and recovery policy. It must settle buffered values before release.
+- **The game** owns load/unload ordering, economy rules, receipt handling, UI bindings and recovery policy. It must settle buffered values before release, normally in an `onBeforeRelease` hook.
 
 The library stays independent of Fusion, Vide, service frameworks and a game's data schema. `src/init.luau` exposes schema helpers and store constructors; internal modules remain small, ordinary Luau modules.
 
@@ -14,7 +14,7 @@ The library stays independent of Fusion, Vide, service frameworks and a game's d
 
 Load transformations use a copy because ProfileStore can autosave while a migration yields, and releasing a failed load also saves. The sequence is: migrate saved shape → normalize migration output → reconcile missing defaults → validate → install candidate → expose observable. Normalization validates persistence-safe values and copies migration output into independent mutable tables. Failures leave the original data untouched. Both new and already-current profiles go through reconciliation and validation. Reconciliation initializes absent maps but never fills entries in existing maps: a missing entry may be an intentional deletion.
 
-Store lookups and tracked writes require current ownership and `IsActive()`, including writes through cached observables. Previously borrowed tables or cached observable reads are not proof of an active session. Cleanup from an old profile cannot remove a replacement. Explicit unload leaves final saving to ProfileStore; `Destroy` disconnects all hooks and is terminal. Neither method claims durable completion.
+Store lookups and tracked writes require current ownership and `IsActive()`, including writes through cached observables. Previously borrowed tables or cached observable reads are not proof of an active session. Cleanup from an old profile cannot remove a replacement. The one exception to the departure check is a session running its before-release hooks: `unloadAsync` and `Destroy` run them before clearing ownership, and writes to that session succeed even though the Player may already be unparented under deferred signal behavior. Explicit unload leaves final saving to ProfileStore; `Destroy` runs before-release hooks, then disconnects all hooks and is terminal. Neither method claims durable completion.
 
 ## Writes and observation
 

@@ -119,6 +119,10 @@ function ServerStore.new<T>(config: ServerStoreConfig<T>)
 		_loadFailed = setmetatable({} :: { [Player]: boolean }, { __mode = "k" }),
 		_saveCallbacks = {} :: { [number]: (player: Player, data: any) -> () },
 		_nextSaveCallbackId = 0,
+		_releaseCallbacks = {} :: { [number]: (player: Player, data: any) -> () },
+		_nextReleaseCallbackId = 0,
+		-- Sessions running before-release hooks stay writable after their Player leaves.
+		_settling = {} :: { [Player]: any },
 		_destroyed = false,
 		_onSessionEnd = function(plr: Player)
 			plr:Kick("Data session ended - Please rejoin")
@@ -259,11 +263,14 @@ function ServerStore._isPublicPath(self: any, path: string): boolean
 end
 
 function ServerStore._activeProfile(self: any, player: Player): any?
-	if self._destroyed or player.Parent ~= Players then
+	if self._destroyed then
 		return nil
 	end
 	local profile = self._profiles[player.UserId]
 	if profile == nil or self._owners[player.UserId] ~= player or not profile:IsActive() then
+		return nil
+	end
+	if player.Parent ~= Players and self._settling[player] ~= profile then
 		return nil
 	end
 	return profile
@@ -340,6 +347,25 @@ function ServerStore._runSaveCallbacks(self: any, player: Player, profile: any)
 			warn(`[PlayerStore] Save callback error for {player.DisplayName}: {err}`)
 		end
 	end
+end
+
+function ServerStore._runReleaseCallbacks(self: any, player: Player, profile: any)
+	if
+		self._destroyed
+		or self._profiles[player.UserId] ~= profile
+		or self._owners[player.UserId] ~= player
+		or not profile:IsActive()
+	then
+		return
+	end
+	self._settling[player] = profile
+	for _, callback in self._releaseCallbacks do
+		local ok, err = pcall(callback, player, profile.Data)
+		if not ok then
+			warn(`[PlayerStore] Release callback error for {player.DisplayName}: {err}`)
+		end
+	end
+	self._settling[player] = nil
 end
 
 function ServerStore._releaseUnpublished(self: any, userId: number, profile: any)
@@ -504,6 +530,10 @@ function ServerStore.unloadAsync(self: any, player: Player)
 	self._lastSnapshotSent[player] = nil
 	local profile = self._profiles[player.UserId]
 	if profile and self._owners[player.UserId] == player then
+		self:_runReleaseCallbacks(player, profile)
+	end
+	-- Re-check: a hook may have yielded while the session was lost or replaced.
+	if profile and self._profiles[player.UserId] == profile and self._owners[player.UserId] == player then
 		self._manualEnd[profile] = true
 		self._releasing[player.UserId] = profile
 		self:_clearOwnedProfile(player, profile)
@@ -579,6 +609,19 @@ function ServerStore.onSave(self: any, callback: (player: Player, data: any) -> 
 	self._saveCallbacks[id] = callback
 	return function()
 		self._saveCallbacks[id] = nil
+	end
+end
+
+--- Runs synchronously when unloadAsync or Destroy is about to release a loaded session,
+--- while tracked writes to that player still succeed (even after the Player has left).
+--- Settle game-owned buffers here so the final save includes them. Hooks must not yield.
+--- ProfileStore-initiated releases (server shutdown, session steal) bypass this; use onSave.
+function ServerStore.onBeforeRelease(self: any, callback: (player: Player, data: any) -> ()): () -> ()
+	self._nextReleaseCallbackId += 1
+	local id = self._nextReleaseCallbackId
+	self._releaseCallbacks[id] = callback
+	return function()
+		self._releaseCallbacks[id] = nil
 	end
 end
 
@@ -669,6 +712,16 @@ function ServerStore.Destroy(self: any)
 	if self._destroyed then
 		return
 	end
+	local settling = {}
+	for userId, profile in self._profiles do
+		local player = self._owners[userId]
+		if player then
+			table.insert(settling, { player = player, profile = profile })
+		end
+	end
+	for _, entry in settling do
+		self:_runReleaseCallbacks(entry.player, entry.profile)
+	end
 	self._destroyed = true
 	-- Destroy ends wrapper callbacks immediately. ProfileStore still performs the
 	-- final save of already committed data when each session is released.
@@ -724,6 +777,8 @@ function ServerStore.Destroy(self: any)
 	end
 	table.clear(self._lastSnapshotSent)
 	table.clear(self._saveCallbacks)
+	table.clear(self._releaseCallbacks)
+	table.clear(self._settling)
 end
 
 return ServerStore
