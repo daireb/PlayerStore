@@ -658,6 +658,47 @@ return function(Runtime, TestRunner)
 		t:expectNil(player.kicked)
 	end)
 
+	t:test("before-release hooks write into the final save after the player leaves", function()
+		local world, store, player = setup()
+		t:expect(store:loadAsync(player))
+		local calls = 0
+		store:onBeforeRelease(function(released, data)
+			calls += 1
+			t:expectEqual(released, player)
+			t:expectEqual(data.Count, 0)
+			t:expect(store:trySet(released, "Count", 5))
+		end)
+		-- Deferred signals: PlayerRemoving handlers see the Player already unparented.
+		player.Parent = nil
+		t:expect(not store:trySet(player, "Count", 3))
+		store:unloadAsync(player)
+		t:expectEqual(calls, 1)
+		t:expectEqual(world.profiles[1].endedData.Count, 5)
+		t:expect(not store:trySet(player, "Count", 6))
+		t:expectNil(player.kicked)
+		store:Destroy()
+	end)
+
+	t:test("before-release hooks run on Destroy, survive errors and disconnect", function()
+		local world, store, player = setup()
+		t:expect(store:loadAsync(player))
+		local disconnected = 0
+		local disconnect = store:onBeforeRelease(function()
+			disconnected += 1
+		end)
+		disconnect()
+		store:onBeforeRelease(function()
+			error("boom")
+		end)
+		store:onBeforeRelease(function(released)
+			t:expect(store:trySet(released, "Count", 9))
+		end)
+		store:Destroy()
+		t:expectEqual(disconnected, 0)
+		t:expectEqual(world.profiles[1].endedData.Count, 9)
+		t:expectNil(store:getData(player))
+	end)
+
 	t:test("cancelled yielding migrations never install candidate", function()
 		for _, action in { "unload", "destroy", "end" } do
 			local world, store, player
