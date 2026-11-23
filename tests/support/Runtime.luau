@@ -237,11 +237,15 @@ function Runtime.new(options: { jobId: string?, services: { [string]: any }? }?)
 						OnAfterSave = Runtime.signal(),
 						OnSessionEnd = Runtime.signal(),
 						saves = 0,
+						messageHandlers = {},
 					}
 					function profile:IsActive()
 						return self.active
 					end
 					function profile:AddUserId() end
+					function profile:MessageHandler(handler)
+						table.insert(self.messageHandlers, handler)
+					end
 					function profile:Save()
 						self.saves += 1
 						self.OnSave:Fire()

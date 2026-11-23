@@ -1,5 +1,7 @@
 local task = require("@lune/task")
 
+local MAILBOX = { inbox = "MailInbox", outbox = "MailOutbox" }
+
 local function transferSchema(library)
 	return library.schema {
 		Coins = 0,
@@ -13,6 +15,10 @@ local function receipt(id: string)
 	return function(data)
 		return data.Receipts[id] == true
 	end
+end
+
+local function gift(_player, data, body)
+	return { updates = { { path = "Coins", value = data.Coins + body.amount } } }
 end
 
 return function(Runtime, TestRunner)
@@ -29,6 +35,87 @@ return function(Runtime, TestRunner)
 		}
 		return world, store, world:player(1), library
 	end
+
+	t:test("mailbox roots must be distinct private maps declared in the schema", function()
+		local world = Runtime.new()
+		local library = world.load(world.root)
+		local function create(definition, mailbox)
+			return library.createServerStore {
+				schema = library.schema(definition),
+				storeId = "Unit",
+				profileStore = world.ProfileStore,
+				mailbox = mailbox,
+			}
+		end
+		local private = library.private(library.map {})
+		t:expectError(function()
+			create({ MailInbox = library.map {}, MailOutbox = private }, MAILBOX)
+		end, "a public map is refused")
+		t:expectError(function()
+			create({ MailInbox = library.private {}, MailOutbox = private }, MAILBOX)
+		end, "a private fixed table is refused")
+		t:expectError(function()
+			create({ MailInbox = private }, MAILBOX)
+		end, "an undeclared root is refused")
+		t:expectError(function()
+			create({ MailInbox = private }, { inbox = "MailInbox", outbox = "MailInbox" })
+		end, "one root cannot be both")
+		create({ MailInbox = private, MailOutbox = library.private(library.map {}) }, MAILBOX):Destroy()
+	end)
+
+	t:test("without a mailbox the message API is refused and no handler is registered", function()
+		local world, store, player = fakeStore()
+		t:expectError(function()
+			store:onMessage("gift", gift)
+		end)
+		t:expectError(function()
+			store:outboxUpdate { to = 2, kind = "gift", id = "gift:1" }
+		end)
+		t:expect(store:loadAsync(player))
+		t:expectEqual(#world.profiles[1].messageHandlers, 0)
+		store:Destroy()
+	end)
+
+	t:test("outboxUpdate builds one private write and checks the envelope", function()
+		local _, store = fakeStore(nil, MAILBOX)
+		local update = store:outboxUpdate { to = 2, kind = "gift", id = "gift:1", body = { amount = 1 } }
+		t:expectEqual(update.path, "MailOutbox/gift:1")
+		t:expectEqual(update.value.to, 2)
+		t:expectEqual(update.value.kind, "gift")
+		t:expectEqual(update.value.body.amount, 1)
+		local invalid = {
+			{ to = 2, kind = "gift", id = "a/b" },
+			{ to = 2, kind = "gift", id = "" },
+			{ to = 1.5, kind = "gift", id = "gift:1" },
+			{ to = 2, kind = "", id = "gift:1" },
+		}
+		for _, message in invalid do
+			t:expectError(function()
+				store:outboxUpdate(message)
+			end, message.id)
+		end
+		t:expectError(function()
+			store:onMessage("gift", gift)
+			store:onMessage("gift", gift)
+		end, "one handler per kind")
+		store:Destroy()
+	end)
+
+	t:test("wipeData keeps both mailbox roots", function()
+		local world, store, player = fakeStore(nil, MAILBOX)
+		t:expect(store:loadAsync(player))
+		t:expect(store:trySetMany(player, {
+			{ path = "Coins", value = 5 },
+			{ path = "MailInbox/gift:1", value = 1 },
+			store:outboxUpdate { to = 2, kind = "gift", id = "gift:2" },
+		}))
+		store:wipeData(player)
+		local data = world.profiles[1].Data
+		t:expectEqual(data.Coins, 0)
+		t:expectEqual(data.MailInbox["gift:1"], 1)
+		t:expectNotNil(data.MailOutbox["gift:2"])
+		store:Destroy()
+	end)
 
 	t:test("a replacement load waits until the release write lands", function()
 		local world, store, old = fakeStore()
