@@ -1,5 +1,6 @@
 -- Test boundary for the real modules: controllable profiles and queued, copied network messages.
--- It deliberately does not model Roblox scheduling, DataStore persistence, or session locks.
+-- It deliberately does not model Roblox scheduling, DataStore persistence, or session locks;
+-- tests/support/Cluster.luau runs the real ProfileStore for those.
 local fs = require("@lune/fs")
 local luau = require("@lune/luau")
 local task = require("@lune/task")
@@ -45,8 +46,17 @@ local function clone(value)
 	return result
 end
 
-function Runtime.new()
+--- `options.jobId` names this simulated server; `options.services` adds engine services by name.
+function Runtime.new(options: { jobId: string?, services: { [string]: any }? }?)
 	local world = { queue = {}, messages = {}, warnings = {}, profiles = {}, starts = 0, clock = os.clock }
+	local jobId = options and options.jobId or "Lune"
+	local extraServices = options and options.services or {}
+	local guids = 0
+	local httpService = {}
+	function httpService.GenerateGUID()
+		guids += 1
+		return `{jobId}-{guids}`
+	end
 	local osShim = table.clone(os)
 	osShim.clock = function()
 		return world.clock()
@@ -175,12 +185,19 @@ function Runtime.new()
 				tick = osShim.clock,
 				debug = debugShim,
 				game = {
+					JobId = jobId,
 					GetService = function(_, name)
 						if name == "ReplicatedStorage" then
 							return view
 						end
 						if name == "Players" then
 							return players
+						end
+						if name == "HttpService" then
+							return httpService
+						end
+						if extraServices[name] then
+							return extraServices[name]
 						end
 						error(`Unexpected service {name}`)
 					end,
@@ -216,6 +233,7 @@ function Runtime.new()
 						LastSavedData = clone(world.saved or template),
 						active = true,
 						OnSave = Runtime.signal(),
+						OnLastSave = Runtime.signal(),
 						OnAfterSave = Runtime.signal(),
 						OnSessionEnd = Runtime.signal(),
 						saves = 0,
@@ -235,11 +253,23 @@ function Runtime.new()
 						self.LastSavedData = clone(self.Data)
 						self.OnAfterSave:Fire(self.LastSavedData)
 					end
+					-- Mirrors ProfileStore's order: OnSave, OnLastSave and OnSessionEnd fire before the
+					-- final write, which lands at once unless `world.finalSaveHook` takes it over.
 					function profile:EndSession()
+						if not self.active then
+							return
+						end
+						self.OnSave:Fire()
+						self.OnLastSave:Fire("Manual")
 						self.active = false
 						self.endedData = clone(self.Data)
 						if not world.deferSessionEnd then
 							self.OnSessionEnd:Fire()
+						end
+						if world.finalSaveHook then
+							world.finalSaveHook(self)
+						else
+							self:completeSave()
 						end
 					end
 					table.insert(world.profiles, profile)

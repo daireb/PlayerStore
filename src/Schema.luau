@@ -125,6 +125,9 @@ function Schema.schema<T>(definition: T): Schema<T>
 	if (definition :: any)._DataVersion ~= nil then
 		error("[PlayerStore] _DataVersion is reserved for ProfileStore migrations")
 	end
+	if (definition :: any)._ReleaseToken ~= nil then
+		error("[PlayerStore] _ReleaseToken is reserved for release tracking")
+	end
 	local valid, err = DataValue.validate(definition, "schema")
 	if not valid then
 		error(`[PlayerStore] Invalid schema: {err}`)

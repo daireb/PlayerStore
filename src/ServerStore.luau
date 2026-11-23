@@ -6,6 +6,7 @@
 	and private path filtering.
 ]=]
 
+local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -15,9 +16,13 @@ local ObservableTable = require(script.Parent.ObservableTable)
 local Validation = require(script.Parent.Validation)
 
 local DATA_VERSION_KEY = "_DataVersion"
+--- Reserved root stamped into Data when the final save starts; seeing it in LastSavedData proves the release landed.
+local RELEASE_TOKEN_KEY = "_ReleaseToken"
 -- Match ProfileStore's default timeout so its stale-session takeover can finish.
 local DEFAULT_LOAD_WAIT = 120
 local DEFAULT_SAVE_CONFIRM_WAIT = 15
+--- Seconds a confirmation waits for a save before asking again; ProfileStore never retries a failed ordinary save. Judgement.
+local SAVE_RETRY_INTERVAL = 5
 local SNAPSHOT_COOLDOWN = 1
 
 local function validTimeout(timeout: any): boolean
@@ -86,7 +91,6 @@ function ServerStore.new<T>(config: ServerStoreConfig<T>)
 
 	local schema = config.schema
 	local migrations = config.migrations or {}
-
 	-- Inject _DataVersion into template for ProfileStore
 	local templateWithVersion = deepClone(schema.template :: any)
 	templateWithVersion[DATA_VERSION_KEY] = -1
@@ -107,8 +111,10 @@ function ServerStore.new<T>(config: ServerStoreConfig<T>)
 		_observables = {} :: { [Player]: any },
 		_loadAttempts = {} :: { [Player]: any },
 		_loading = {} :: { [number]: any },
+		-- Held from the final save's start until it lands, so a same-server rejoin can't take the lock from it.
 		_releasing = {} :: { [number]: any },
-		_releaseConnections = {} :: { [any]: any },
+		_sessions = {} :: { [any]: any },
+		_releaseTokens = setmetatable({} :: { [any]: string }, { __mode = "k" }),
 		_profileConnections = {} :: { [any]: { any } },
 		_manualEnd = {} :: { [any]: boolean },
 		_snapshotPending = {} :: { [Player]: boolean },
@@ -368,21 +374,64 @@ function ServerStore._runReleaseCallbacks(self: any, player: Player, profile: an
 	self._settling[player] = nil
 end
 
-function ServerStore._releaseUnpublished(self: any, userId: number, profile: any)
-	if not profile:IsActive() then
+--------------------------------------------------------------------------------
+-- Sessions: release tracking
+--------------------------------------------------------------------------------
+
+--- Follows an acquired profile until its release write lands, or until it is stolen.
+function ServerStore._openSession(self: any, userId: number, profile: any): any
+	local session = {
+		userId = userId,
+		profile = profile,
+		token = nil :: string?,
+		connections = {} :: { any },
+	}
+	self._sessions[profile] = session
+	table.insert(
+		session.connections,
+		profile.OnLastSave:Connect(function()
+			-- Runs before the final transform reads Data, and tracked writes stop once the session ends,
+			-- so any save carrying this token wrote the final Data.
+			local token = HttpService:GenerateGUID(false)
+			session.token = token
+			self._releaseTokens[profile] = token
+			profile.Data[RELEASE_TOKEN_KEY] = token
+			if self._releasing[userId] == nil then
+				self._releasing[userId] = profile
+			end
+		end)
+	)
+	table.insert(
+		session.connections,
+		profile.OnSessionEnd:Connect(function()
+			if session.token == nil then
+				-- Ended without a final save of ours (a steal): nothing this session wrote can land now.
+				self:_closeSession(session)
+			end
+		end)
+	)
+	table.insert(
+		session.connections,
+		profile.OnAfterSave:Connect(function(saved)
+			if session.token ~= nil and typeof(saved) == "table" and saved[RELEASE_TOKEN_KEY] == session.token then
+				self:_closeSession(session)
+			end
+		end)
+	)
+	return session
+end
+
+function ServerStore._closeSession(self: any, session: any)
+	if self._sessions[session.profile] ~= session then
 		return
 	end
-	self._releasing[userId] = profile
-	local connection: any
-	connection = profile.OnSessionEnd:Connect(function()
-		if self._releasing[userId] == profile then
-			self._releasing[userId] = nil
-		end
-		self._releaseConnections[profile] = nil
+	self._sessions[session.profile] = nil
+	for _, connection in session.connections do
 		connection:Disconnect()
-	end)
-	self._releaseConnections[profile] = connection
-	profile:EndSession()
+	end
+	if self._releasing[session.userId] == session.profile then
+		self._releasing[session.userId] = nil
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -424,19 +473,19 @@ function ServerStore.loadAsync(self: any, player: Player): boolean
 		end
 		return result
 	end
-	-- ProfileStore rejects a second StartSessionAsync for a key already
-	-- loading or owned in this process.
+	-- ProfileStore rejects a second StartSessionAsync for a key already loading or owned in this
+	-- process. A release counts until its final write lands: a session started here sooner would
+	-- make ProfileStore refuse that write's retries (same server, newer load count).
 	while self._loading[userId] ~= nil or self._profiles[userId] ~= nil or self._releasing[userId] ~= nil do
 		if cancelled() then
+			if not token.cancelled and not self._destroyed and player.Parent == Players then
+				self._loadFailed[player] = true
+				player:Kick("Failed to load data - Please rejoin")
+			end
 			return complete(false)
 		end
 		if self:_activeProfile(player) ~= nil then
 			return complete(true)
-		end
-		local releasing = self._releasing[userId]
-		if releasing and not releasing:IsActive() then
-			self._releasing[userId] = nil
-			continue
 		end
 		task.wait(0.05)
 	end
@@ -460,8 +509,9 @@ function ServerStore.loadAsync(self: any, player: Player): boolean
 		end
 		return complete(false)
 	end
+	self:_openSession(userId, profile)
 	if cancelled() then
-		self:_releaseUnpublished(userId, profile)
+		profile:EndSession()
 		return complete(false)
 	end
 	profile:AddUserId(userId)
@@ -471,11 +521,11 @@ function ServerStore.loadAsync(self: any, player: Player): boolean
 		end)
 	then
 		self._loadFailed[player] = true
-		self:_releaseUnpublished(userId, profile)
+		profile:EndSession()
 		return complete(false)
 	end
 	if cancelled() or not profile:IsActive() then
-		self:_releaseUnpublished(userId, profile)
+		profile:EndSession()
 		return complete(false)
 	end
 
@@ -493,9 +543,6 @@ function ServerStore.loadAsync(self: any, player: Player): boolean
 	local sessionConnection = profile.OnSessionEnd:Connect(function()
 		local wasCurrent = self._profiles[userId] == profile and self._owners[userId] == player
 		local intentional = self._manualEnd[profile] == true
-		if self._releasing[userId] == profile then
-			self._releasing[userId] = nil
-		end
 		self:_clearOwnedProfile(player, profile)
 		local connections = self._profileConnections[profile]
 		if connections then
@@ -535,8 +582,8 @@ function ServerStore.unloadAsync(self: any, player: Player)
 	-- Re-check: a hook may have yielded while the session was lost or replaced.
 	if profile and self._profiles[player.UserId] == profile and self._owners[player.UserId] == player then
 		self._manualEnd[profile] = true
-		self._releasing[player.UserId] = profile
 		self:_clearOwnedProfile(player, profile)
+		-- Synchronously fires OnLastSave, which holds `_releasing` until the final write lands.
 		profile:EndSession()
 	end
 end
@@ -661,37 +708,60 @@ function ServerStore.confirmSavedAsync(
 	if predicateError then
 		return false, predicateError
 	end
+	-- Follows the captured profile, not the Player: a departing Player's session keeps saving, and
+	-- its release write retries until it lands.
 	local confirmed = false
-	local connection = profile.OnAfterSave:Connect(function()
-		confirmed = isConfirmed()
-	end)
-	if self:_activeProfile(player) ~= profile then
-		connection:Disconnect()
-		return false, "Session ended"
+	local finalSaveStarted = false
+	local sessionLost = false
+	local lastActivity = os.clock()
+	local connections = {
+		profile.OnAfterSave:Connect(function()
+			lastActivity = os.clock()
+			confirmed = confirmed or isConfirmed()
+		end),
+		profile.OnLastSave:Connect(function()
+			finalSaveStarted = true
+		end),
+		profile.OnSessionEnd:Connect(function()
+			sessionLost = sessionLost or not finalSaveStarted
+		end),
+	}
+	local function finish(result: boolean, err: string?): (boolean, string?)
+		for _, connection in connections do
+			connection:Disconnect()
+		end
+		return result, err
 	end
 	local ok, err = pcall(profile.Save, profile)
 	if not ok then
-		connection:Disconnect()
-		return false, tostring(err)
+		return finish(false, tostring(err))
 	end
 	local deadline = os.clock() + (timeout or DEFAULT_SAVE_CONFIRM_WAIT)
-	while not confirmed and not isConfirmed() do
+	while true do
+		if confirmed or isConfirmed() then
+			return finish(true, nil)
+		end
 		if predicateError then
-			connection:Disconnect()
-			return false, predicateError
+			return finish(false, predicateError)
 		end
-		if self:_activeProfile(player) ~= profile then
-			connection:Disconnect()
-			return false, "Session ended"
+		if sessionLost then
+			return finish(false, "Session lost")
 		end
-		if os.clock() >= deadline then
-			connection:Disconnect()
-			return false, "Save confirmation timed out"
+		local token = self._releaseTokens[profile]
+		local saved = profile.LastSavedData
+		if token ~= nil and typeof(saved) == "table" and saved[RELEASE_TOKEN_KEY] == token then
+			return finish(false, "Not in final save")
+		end
+		local now = os.clock()
+		if now >= deadline then
+			return finish(false, "Save confirmation timed out")
+		end
+		if profile:IsActive() and now - lastActivity >= SAVE_RETRY_INTERVAL then
+			lastActivity = now
+			pcall(profile.Save, profile)
 		end
 		task.wait(0.05)
 	end
-	connection:Disconnect()
-	return true, nil
 end
 
 function ServerStore.wipeData(self: any, player: Player)
@@ -737,7 +807,6 @@ function ServerStore.Destroy(self: any)
 		local profile = entry.profile
 		local player = entry.player
 		self._manualEnd[profile] = true
-		self._releasing[userId] = profile
 		if player then
 			self:_clearOwnedProfile(player, profile)
 		else
@@ -758,9 +827,12 @@ function ServerStore.Destroy(self: any)
 		end
 		self._profileConnections[profile] = nil
 	end
-	for profile, connection in self._releaseConnections do
-		connection:Disconnect()
-		self._releaseConnections[profile] = nil
+	local sessions = {}
+	for _, session in self._sessions do
+		table.insert(sessions, session)
+	end
+	for _, session in sessions do
+		self:_closeSession(session)
 	end
 	table.clear(self._manualEnd)
 	table.clear(self._releasing)
