@@ -4,6 +4,23 @@ All notable changes to PlayerStore will be documented in this file.
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- A mailbox for effects between players: pass `mailbox = { inbox, outbox }`, naming two root fields declared as `private(map {})`. `outboxUpdate(message)` returns the write that queues a message, to put in the same `trySetMany` as the decision; PlayerStore sends it with ProfileStore's `MessageAsync` once it is saved and deletes it after the send commits. `onMessage(kind, handler)` applies each message id exactly once: the handler's plan, an inbox mark and any replies land in one write, with ProfileStore's queue removal in the same save. Handlers must not yield; messages they defer, and unknown kinds, are retried and never dropped (`retryMessages(player)`). Exports the `Outgoing`, `MessageMeta`, `MessageResult` and `MessageHandler` types. Without `mailbox`, a store registers no message handler.
+
+### Changed
+
+- `confirmSavedAsync` follows the captured session instead of the Player. It no longer returns `"Session ended"` when the Player leaves or the session is released: it waits for the release save. It asks for another save every 5 seconds while none lands, and returns `"Session lost"` after a steal and `"Not in final save"` when the release landed without the predicate. Only `true` is a fact.
+- `_ReleaseToken` is a reserved root, like `_DataVersion`: the release stamps it into the final save. Schemas may not declare it and it never replicates.
+- `wipeData` keeps the mailbox roots.
+- A load waiting for the same user's previous session on this server now kicks when the acquisition deadline passes, as other failed loads do.
+
+### Fixed
+
+- A same-server rejoin no longer discards the previous session's final save. `loadAsync` waited only until the old session ended, which ProfileStore signals before the final write; if that write failed once and the user rejoined during its backoff, the new session took the lock and every retry of the old write was refused. It now waits until the release write has landed.
+
 ## [0.4.2] - 2026-09-29
 
 ### Added
