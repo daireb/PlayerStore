@@ -70,14 +70,19 @@ end
 
 t:test("confirmation follows unloadAsync to the final save, which carries the release token", function()
 	local store = createStore("release")
+	-- Written inside the release, so only the final save can carry it; Mock commits ordinary saves at once.
+	store:onBeforeRelease(function(releasing)
+		store:trySet(releasing, "Receipts/r1", true)
+	end)
 	t:expect(store:loadAsync(player))
-	t:expect(store:trySet(player, "Receipts/r1", true))
 	local result
 	task.spawn(function()
 		result = table.pack(store:confirmSavedAsync(player, function(data)
 			return data.Receipts.r1 == true
 		end, 10))
 	end)
+	task.wait(0.5) -- Lets the confirmation's own save land, without the marker.
+	t:expectNil(result, "still waiting: the marker is not saved before the release")
 	store:unloadAsync(player)
 	waitFor("confirmation", function()
 		return result ~= nil

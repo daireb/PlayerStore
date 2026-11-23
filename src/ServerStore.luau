@@ -23,9 +23,22 @@ local DEFAULT_LOAD_WAIT = 120
 local DEFAULT_SAVE_CONFIRM_WAIT = 15
 --- Seconds a confirmation waits for a save before asking again; ProfileStore never retries a failed ordinary save. Judgement.
 local SAVE_RETRY_INTERVAL = 5
+--- Seconds a load waits on a release hold between reads of the key that check whether the hold can end;
+--- each is one GetAsync, and most holds end with their first save. Judgement.
+local RELEASE_PROBE_INTERVAL = 5
 local SNAPSHOT_COOLDOWN = 1
 --- Envelope version this build reads; a newer envelope waits for a newer server.
 local MESSAGE_VERSION = 1
+
+local function deepFreeze<T>(value: T): T
+	if type(value) == "table" and not table.isfrozen(value) then
+		for _, child in value do
+			deepFreeze(child)
+		end
+		table.freeze(value)
+	end
+	return value
+end
 
 local function validTimeout(timeout: any): boolean
 	return type(timeout) == "number" and timeout == timeout and timeout >= 0 and timeout < math.huge
@@ -159,6 +172,9 @@ function ServerStore.new<T>(config: ServerStoreConfig<T>)
 		_releasing = {} :: { [number]: any },
 		_sessions = {} :: { [any]: any },
 		_releaseTokens = setmetatable({} :: { [any]: string }, { __mode = "k" }),
+		_releaseProbes = {} :: { [any]: boolean },
+		-- When each profile last saved or was asked to, shared by every confirmation waiting on it.
+		_saveActivity = setmetatable({} :: { [any]: number }, { __mode = "k" }),
 		_mailbox = mailbox,
 		_messageHandlers = {} :: { [string]: MessageHandler },
 		_sending = {} :: { [string]: boolean },
@@ -478,6 +494,34 @@ function ServerStore._openSession(self: any, userId: number, profile: any): any
 	return session
 end
 
+--- Ends a release hold if a view of the key shows the released session can never write again: a newer
+--- session started, or ours cleared the lock (the fence rule). This covers a release whose final save was
+--- refused, or answered with someone else's data, so its token never lands. A view can only be stale,
+--- and these facts never revert, so a cached read only delays the load.
+function ServerStore._probeRelease(self: any, userId: number)
+	local profile = self._releasing[userId]
+	if profile == nil or self._releaseProbes[profile] then
+		return
+	end
+	self._releaseProbes[profile] = true
+	task.spawn(function()
+		local ok, view = pcall(self._playerStore.GetAsync, self._playerStore, tostring(userId))
+		self._releaseProbes[profile] = nil
+		if not ok or typeof(view) ~= "table" or typeof(view.SessionLoadCount) ~= "number" then
+			return
+		end
+		local loadCount = profile.SessionLoadCount
+		if (view.Session == nil and view.SessionLoadCount >= loadCount) or view.SessionLoadCount > loadCount then
+			local session = self._sessions[profile]
+			if session then
+				self:_closeSession(session)
+			elseif self._releasing[userId] == profile then
+				self._releasing[userId] = nil
+			end
+		end
+	end)
+end
+
 function ServerStore._closeSession(self: any, session: any)
 	if self._sessions[session.profile] ~= session then
 		return
@@ -492,8 +536,17 @@ function ServerStore._closeSession(self: any, session: any)
 	end
 end
 
---- Sends outbox entries present in both Data and LastSavedData, so a send never runs ahead of a
---- decision that a crash could still undo. Receivers dedupe by id, so resends are harmless.
+local function validOutboxEntry(entry: any): boolean
+	return typeof(entry) == "table"
+		and typeof(entry.to) == "number"
+		and typeof(entry.kind) == "string"
+		and typeof(entry.nonce) == "string"
+end
+
+--- Sends an outbox entry once Data and LastSavedData hold the same write of it (same nonce), and sends
+--- the saved copy, so a send never runs ahead of a decision that a crash could still undo. After a steal,
+--- LastSavedData is the thief's, and only a copy the thief saved of this very write matches. Receivers
+--- dedupe by id, so resends are harmless.
 function ServerStore._relay(self: any, session: any)
 	local profile = session.profile
 	local name = self._mailbox.outbox
@@ -504,25 +557,26 @@ function ServerStore._relay(self: any, session: any)
 		return
 	end
 	for id, entry in outbox do
-		if savedOutbox[id] == nil or self._sending[id] or session.sent[id] then
+		local savedEntry = savedOutbox[id]
+		if savedEntry == nil or self._sending[id] then
 			continue
 		end
-		if
-			typeof(entry) ~= "table"
-			or typeof(entry.to) ~= "number"
-			or typeof(entry.kind) ~= "string"
-			or typeof(id) ~= "string"
-		then
+		if typeof(id) ~= "string" or not validOutboxEntry(entry) or not validOutboxEntry(savedEntry) then
 			if not session.warned[id] then
 				session.warned[id] = true
 				warn(`[PlayerStore] Malformed outbox entry {tostring(id)} for {session.userId} was not sent`)
 			end
 			continue
 		end
+		local nonce = savedEntry.nonce
+		if entry.nonce ~= nonce or session.sent[id] == nonce then
+			continue -- An unsaved rewrite waits for its own save; this write was already sent.
+		end
 		self._sending[id] = true
-		local envelope = { v = MESSAGE_VERSION, id = id, kind = entry.kind, from = session.userId, body = entry.body }
+		local envelope =
+			{ v = MESSAGE_VERSION, id = id, kind = savedEntry.kind, from = session.userId, body = savedEntry.body }
 		task.spawn(function()
-			local ok, sent = pcall(self._playerStore.MessageAsync, self._playerStore, tostring(entry.to), envelope)
+			local ok, sent = pcall(self._playerStore.MessageAsync, self._playerStore, tostring(savedEntry.to), envelope)
 			self._sending[id] = nil
 			if not ok then
 				warn(`[PlayerStore] Message {id} failed to send: {sent}`)
@@ -531,9 +585,17 @@ function ServerStore._relay(self: any, session: any)
 			if sent ~= true then
 				return -- Closing: the entry stays, and the next session sends it.
 			end
-			session.sent[id] = true
+			session.sent[id] = nonce
 			local player = session.player
-			if player and self:_activeProfile(player) == profile then
+			local current = if typeof(profile.Data) == "table" then profile.Data[name] else nil
+			local live = if typeof(current) == "table" then current[id] else nil
+			-- A rewrite that landed while MessageAsync yielded is a different write: it stays and is sent itself.
+			if
+				player
+				and self:_activeProfile(player) == profile
+				and typeof(live) == "table"
+				and live.nonce == nonce
+			then
 				self:trySet(player, `{name}/{id}`, nil)
 			end
 		end)
@@ -556,6 +618,15 @@ function ServerStore._messageWrites(self: any, id: string, result: any): ({ Obse
 	end
 	if result.after ~= nil and typeof(result.after) ~= "function" then
 		return nil, "after must be a function"
+	end
+	for _, field in { "updates", "send" } do
+		if result[field] ~= nil and typeof(result[field]) ~= "table" then
+			return nil, `{field} must be a table`
+		end
+	end
+	-- `{ updates = plan }` with a nil plan must not consume the message as if nothing were intended.
+	if result.updates == nil and result.send == nil then
+		return nil, "a plan needs updates or send; return { updates = {} } to consume a message on purpose"
 	end
 	local inbox, outbox = self._mailbox.inbox, self._mailbox.outbox
 	local writes = {}
@@ -619,8 +690,16 @@ function ServerStore._deliver(self: any, session: any, message: any, processed: 
 		return
 	end
 	local thread = coroutine.create(handler)
-	local ok, result, reason =
-		coroutine.resume(thread, player, profile.Data, message.body, table.freeze { id = id, from = message.from })
+	-- A frozen copy, so a handler that writes data itself errors instead of leaving an effect with no
+	-- inbox mark, which a later save would carry and a redelivery would apply again. Messages are rare,
+	-- so the copy's cost is per delivery, not per frame.
+	local ok, result, reason = coroutine.resume(
+		thread,
+		player,
+		deepFreeze(deepClone(profile.Data)),
+		message.body,
+		table.freeze { id = id, from = message.from }
+	)
 	if coroutine.status(thread) ~= "dead" then
 		-- Cancelled, not closed: the scheduler may hold it in a wait, and must never resume it.
 		task.cancel(thread)
@@ -637,7 +716,10 @@ function ServerStore._deliver(self: any, session: any, message: any, processed: 
 		deferMessage(session, message, processed, if typeof(reason) == "string" then reason else "handler deferred")
 		return
 	end
-	local writes, writeError = self:_messageWrites(id, result)
+	local planOk, writes, writeError = pcall(self._messageWrites, self, id, result)
+	if not planOk then
+		writes, writeError = nil, writes
+	end
 	if writes == nil then
 		warn(`[PlayerStore] Message handler for "{message.kind}" returned an invalid plan for {id}: {writeError}`)
 		session.deferred[processed] = message
@@ -673,12 +755,13 @@ function ServerStore._retrySession(self: any, session: any)
 	end
 end
 
---- Coalesces the saves that make applied messages durable to one per frame per profile.
+--- Coalesces requested saves (applied messages, confirmations) to one per frame per profile.
 function ServerStore._requestSave(self: any, profile: any)
 	if self._saveRequests[profile] then
 		return
 	end
 	self._saveRequests[profile] = true
+	self._saveActivity[profile] = os.clock()
 	task.defer(function()
 		self._saveRequests[profile] = nil
 		if profile:IsActive() then
@@ -729,6 +812,7 @@ function ServerStore.loadAsync(self: any, player: Player): boolean
 	-- ProfileStore rejects a second StartSessionAsync for a key already loading or owned in this
 	-- process. A release counts until its final write lands: a session started here sooner would
 	-- make ProfileStore refuse that write's retries (same server, newer load count).
+	local nextProbe = os.clock() + RELEASE_PROBE_INTERVAL
 	while self._loading[userId] ~= nil or self._profiles[userId] ~= nil or self._releasing[userId] ~= nil do
 		if cancelled() then
 			if not token.cancelled and not self._destroyed and player.Parent == Players then
@@ -739,6 +823,10 @@ function ServerStore.loadAsync(self: any, player: Player): boolean
 		end
 		if self:_activeProfile(player) ~= nil then
 			return complete(true)
+		end
+		if self._releasing[userId] ~= nil and os.clock() >= nextProbe then
+			nextProbe = os.clock() + RELEASE_PROBE_INTERVAL
+			self:_probeRelease(userId)
 		end
 		task.wait(0.05)
 	end
@@ -974,10 +1062,9 @@ function ServerStore.confirmSavedAsync(
 	local confirmed = false
 	local finalSaveStarted = false
 	local sessionLost = false
-	local lastActivity = os.clock()
 	local connections = {
 		profile.OnAfterSave:Connect(function()
-			lastActivity = os.clock()
+			self._saveActivity[profile] = os.clock()
 			confirmed = confirmed or isConfirmed()
 		end),
 		profile.OnLastSave:Connect(function()
@@ -993,10 +1080,8 @@ function ServerStore.confirmSavedAsync(
 		end
 		return result, err
 	end
-	local ok, err = pcall(profile.Save, profile)
-	if not ok then
-		return finish(false, tostring(err))
-	end
+	-- Coalesced per frame, so confirmations of writes made in one frame share one save.
+	self:_requestSave(profile)
 	local deadline = os.clock() + (timeout or DEFAULT_SAVE_CONFIRM_WAIT)
 	while true do
 		if confirmed or isConfirmed() then
@@ -1017,16 +1102,16 @@ function ServerStore.confirmSavedAsync(
 		if now >= deadline then
 			return finish(false, "Save confirmation timed out")
 		end
-		if profile:IsActive() and now - lastActivity >= SAVE_RETRY_INTERVAL then
-			lastActivity = now
-			pcall(profile.Save, profile)
+		if profile:IsActive() and now - (self._saveActivity[profile] or 0) >= SAVE_RETRY_INTERVAL then
+			self:_requestSave(profile)
 		end
 		task.wait(0.05)
 	end
 end
 
---- Handles messages of `kind`. The handler plans against `data` and must not yield: a yielding handler
---- is closed and its message deferred. Return nil plus a reason to defer; deferred messages are retried, never dropped.
+--- Handles messages of `kind`. The handler plans against `data`, a frozen copy, and must not yield: a
+--- yielding handler is cancelled and its message deferred. Return nil plus a reason to defer; deferred
+--- messages are retried, never dropped. A plan needs `updates` or `send`; `{ updates = {} }` consumes on purpose.
 function ServerStore.onMessage(self: any, kind: string, handler: MessageHandler): () -> ()
 	assert(self._mailbox ~= nil, "[PlayerStore] onMessage needs the mailbox option")
 	assert(type(kind) == "string" and kind ~= "", "[PlayerStore] message kind must be a non-empty string")
@@ -1048,7 +1133,8 @@ function ServerStore.onMessage(self: any, kind: string, handler: MessageHandler)
 end
 
 --- Builds the write that queues `message`; put it in the same trySetMany as the decision it belongs to.
---- `id` must be unique across all senders and kinds (prefix it with the kind: "gift:<PurchaseId>").
+--- `id` must be unique across all senders and kinds (prefix it with the kind: "gift:<PurchaseId>"), and
+--- written once: a rewrite of an id already sent reaches its new recipient as a second message.
 function ServerStore.outboxUpdate(self: any, message: Outgoing): ObservableTable.Update
 	assert(self._mailbox ~= nil, "[PlayerStore] outboxUpdate needs the mailbox option")
 	assert(typeof(message) == "table", "[PlayerStore] message must be a table")
@@ -1062,7 +1148,11 @@ function ServerStore.outboxUpdate(self: any, message: Outgoing): ObservableTable
 		type(id) == "string" and id ~= "" and not string.find(id, "/", 1, true),
 		"[PlayerStore] message.id must be a non-empty string without '/'"
 	)
-	return { path = `{self._mailbox.outbox}/{id}`, value = { to = to, kind = kind, body = message.body } }
+	return {
+		path = `{self._mailbox.outbox}/{id}`,
+		-- The nonce names this write, so the relay can tell a saved entry from an unsaved rewrite of its id.
+		value = { to = to, kind = kind, body = message.body, nonce = HttpService:GenerateGUID(false) },
+	}
 end
 
 --- Retries this session's deferred messages now (e.g. once something a handler waited for is ready).
@@ -1074,20 +1164,30 @@ function ServerStore.retryMessages(self: any, player: Player)
 	end
 end
 
-function ServerStore.wipeData(self: any, player: Player)
+--- `keep` names further root fields to leave alone, such as receipt marks that bind outbox entries:
+--- wiping a mark while its receipt is still pending lets the redelivery decide again.
+function ServerStore.wipeData(self: any, player: Player, keep: { string }?)
 	local profile = self:_activeProfile(player)
 	if profile == nil then
 		error("[PlayerStore] No profile found for player")
 	end
 
 	local template = self._schema.template :: any
+	local kept = {}
+	for _, key in keep or {} do
+		assert(template[key] ~= nil, `[PlayerStore] wipeData can only keep schema root fields, not "{tostring(key)}"`)
+		kept[key] = true
+	end
 	local mailbox = self._mailbox
-	for key, value in template do
+	if mailbox then
 		-- Wiping the inbox would let a resend apply twice; wiping the outbox would drop undelivered messages.
-		if mailbox and (key == mailbox.inbox or key == mailbox.outbox) then
-			continue
+		kept[mailbox.inbox] = true
+		kept[mailbox.outbox] = true
+	end
+	for key, value in template do
+		if not kept[key] then
+			profile.Data[key] = deepClone(value)
 		end
-		profile.Data[key] = deepClone(value)
 	end
 
 	player:Kick("Your data has been wiped. Please rejoin.")

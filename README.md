@@ -91,19 +91,19 @@ Paths use string keys separated by `/`. Values must be finite numbers, booleans,
 
 | Method | Contract |
 | --- | --- |
-| `loadAsync(player)` | Returns success; loads, migrates, reconciles and validates before exposing data. Acquisition has a 120-second cancellation deadline, allowing ProfileStore's stale-session recovery to finish. It first waits, within that deadline, for the same user's previous release on this server to land. Failed loads kick by default. Concurrent calls for the same Player share one attempt and its result. |
+| `loadAsync(player)` | Returns success; loads, migrates, reconciles and validates before exposing data. Acquisition has a 120-second cancellation deadline, allowing ProfileStore's stale-session recovery to finish. It first waits, within that deadline, for the same user's previous release on this server to land; while it waits it reads the key every 5 seconds and stops waiting once the old session can never write again (a newer session started, or the old one cleared its lock). Failed loads kick by default. Concurrent calls for the same Player share one attempt and its result. |
 | `unloadAsync(player)` | Cancels a pending load or starts session release. Does not wait for a save confirmation. |
 | `getData(player)` / `observe(player)` | Returns data / writable observable only while this store owns an active session; otherwise `nil`. |
 | `trySet(player, path, value)` / `trySetMany(player, updates)` | Returns `(boolean, error?)`. An empty batch is a successful no-op. Observable `set` / `setMany` raises on invalid writes. |
 | `waitForData(player, timeout?)` | Returns data or `nil` on timeout, failed load, departure, unload or destruction. Default: 120 seconds, matching the acquisition deadline. |
-| `confirmSavedAsync(player, predicate, timeout?)` | Returns `(boolean, error?)` once **LastSavedData** satisfies the predicate, requesting a save if needed and again every 5 seconds while none lands. Follows the session through the Player's departure and its release save. Default: 15 seconds. Predicate must be synchronous, read-only and true only for a durable marker the write added. Only `true` is a fact: `false` means not confirmed (`"Data not loaded"`, `"Session lost"`, `"Not in final save"`, `"Save confirmation timed out"` or a predicate error), and a timed-out write can still land. |
+| `confirmSavedAsync(player, predicate, timeout?)` | Returns `(boolean, error?)` once **LastSavedData** satisfies the predicate, requesting a save if needed and again every 5 seconds while none lands (one request per profile, shared by concurrent confirmations). Follows the session through the Player's departure and its release save. Default: 15 seconds. Predicate must be synchronous, read-only and true only for a durable marker the write added. Only `true` is a fact: `false` means not confirmed (`"Data not loaded"`, `"Session lost"`, `"Not in final save"`, `"Save confirmation timed out"` or a predicate error), and a timed-out write can still land. |
 | `onSave(callback)` | Registers `(player, data)` before ProfileStore saves; returns a disconnect function. Synchronous hooks may update save-only metadata directly; these changes are not validated or replicated. |
 | `onBeforeRelease(callback)` | Registers `(player, data)` to run synchronously when `unloadAsync` or `Destroy` is about to release a loaded session; returns a disconnect function. Tracked writes to that player succeed inside the hook even after the Player has left (deferred `PlayerRemoving`), so settle game-owned buffers here. Must not yield. ProfileStore-initiated releases (shutdown, session loss) do not run it; flush from `onSave` as well if those saves matter. |
 | `onSessionEnd(callback)` | Replaces the kick handler for unexpected session loss. Explicit unload does not call it. |
 | `onMessage(kind, handler)` | Registers the handler for messages of `kind`; returns a disconnect function. See [Transfers between players](#transfers-between-players). |
-| `outboxUpdate(message)` | Returns the update that queues `{ to, kind, id, body }`; put it in the same `trySetMany` as the decision it belongs to. |
+| `outboxUpdate(message)` | Returns the update that queues `{ to, kind, id, body }`, stamped with a fresh nonce; put it in the same `trySetMany` as the decision it belongs to. |
 | `retryMessages(player)` | Retries that session's deferred messages now. |
-| `wipeData(player)` | Resets schema fields, except the mailbox roots, and kicks the player; the game's removal handler releases the profile. |
+| `wipeData(player, keep?)` | Resets schema fields, except the mailbox roots and any root fields named in `keep`, and kicks the player; the game's removal handler releases the profile. Keep receipt marks that bind outbox entries: wiping one while its receipt is still pending lets the redelivery decide again. |
 | `Destroy()` | Runs before-release hooks, then cancels loads, disconnects callbacks, releases sessions and destroys the remote. Final save uses committed data. Idempotent. |
 
 Use save confirmation for a specific durable marker when required; ordinary writes rely on ProfileStore's autosave. A timeout does not undo a write or prove it was lost. After a session is stolen, LastSavedData is the new owner's data, so test a marker your write added, never a balance. Receipt deduplication, granting policy and retries belong to the game.
@@ -136,7 +136,7 @@ local ok, err = store:trySetMany(buyer, {
 })
 ```
 
-PlayerStore sends an entry once it is saved, wherever the receiver is (this server, another one, or offline until they next join), and deletes it after the send commits. Receive with one handler per kind:
+PlayerStore sends an entry once the same write of it is saved (it sends the saved copy), wherever the receiver is (this server, another one, or offline until they next join), and deletes it after the send commits. Receive with one handler per kind:
 
 ```lua
 store:onMessage("gift", function(player, data, body, meta)
@@ -153,8 +153,8 @@ store:onMessage("gift", function(player, data, body, meta)
 end)
 ```
 
-- Ids are idempotency keys: unique across senders and kinds, so prefix them with the kind. The receiver applies an id once, however often it arrives.
-- Handlers plan against `data` and return writes; they never yield or write themselves. A yielding handler is cancelled and its message deferred. Return `nil, reason` to defer a message (for example until something it needs has loaded), then call `retryMessages(player)`. Deferred messages, unknown kinds and handlers that error are retried on later saves, on `onMessage` and in the next session, never dropped.
+- Ids are idempotency keys: unique across senders and kinds, so prefix them with the kind. The receiver applies an id once, however often it arrives. Write each id once: a rewrite of an id that was already sent reaches its new recipient as a second message.
+- Handlers plan against `data`, a frozen copy, and return writes; they never yield or write themselves. A write to `data` errors and defers the message. A plan needs `updates` or `send` (tables), so a planner that returned `nil` defers rather than consuming the message; return `{ updates = {} }` to consume one on purpose. A yielding handler is cancelled and its message deferred. Return `nil, reason` to defer a message (for example until something it needs has loaded), then call `retryMessages(player)`. Deferred messages, unknown kinds and handlers that error are retried on later saves, on `onMessage` and in the next session, never dropped.
 - Handlers must not write the mailbox roots. Delivery order is unspecified.
 - The inbox is never pruned (about 50 bytes per message received): pruning would let a late resend apply twice. `wipeData` keeps both roots; admin tools that replace saved data must keep them too.
 - Limits: ProfileStore keeps at most 1000 unread messages per key and drops the oldest. A corrupt-key reset or `RemoveAsync` discards the queue. A message whose sender's server dies or shuts down between saving and sending waits for the sender's next session.

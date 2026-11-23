@@ -102,7 +102,7 @@ return function(Runtime, TestRunner)
 		store:Destroy()
 	end)
 
-	t:test("wipeData keeps both mailbox roots", function()
+	t:test("wipeData keeps both mailbox roots and the roots it is asked to keep", function()
 		local world, store, player = fakeStore(nil, MAILBOX)
 		t:expect(store:loadAsync(player))
 		t:expect(store:trySetMany(player, {
@@ -110,11 +110,16 @@ return function(Runtime, TestRunner)
 			{ path = "MailInbox/gift:1", value = 1 },
 			store:outboxUpdate { to = 2, kind = "gift", id = "gift:2" },
 		}))
-		store:wipeData(player)
+		t:expect(store:trySet(player, "Receipts/r1", true))
+		t:expectError(function()
+			store:wipeData(player, { "Unknown" })
+		end, "only schema roots can be kept")
+		store:wipeData(player, { "Receipts" })
 		local data = world.profiles[1].Data
 		t:expectEqual(data.Coins, 0)
 		t:expectEqual(data.MailInbox["gift:1"], 1)
 		t:expectNotNil(data.MailOutbox["gift:2"])
+		t:expectEqual(data.Receipts.r1, true, "a kept root survives")
 		store:Destroy()
 	end)
 
@@ -186,6 +191,7 @@ return function(Runtime, TestRunner)
 		task.spawn(function()
 			result = store:confirmSavedAsync(player, receipt("r1"))
 		end)
+		task.wait() -- The confirmation's save is coalesced to the end of the frame.
 		local profile = world.profiles[1]
 		t:expectEqual(profile.saves, 1)
 		elapsed = 4.9
@@ -286,6 +292,7 @@ return function(Runtime, TestRunner)
 		server:fault("1", "error") -- The confirmation's own save fails; only the release can land the marker.
 		local finalSave = server:fault("1", "hold", { phase = "before" })
 		local call = spawnCall(store.confirmSavedAsync, store, player, receipt("r1"))
+		task.wait(0.1)
 		server:leave(player)
 		store:unloadAsync(player)
 		task.wait(0.2)
@@ -441,6 +448,43 @@ return function(Runtime, TestRunner)
 		t:expectNotNil(cluster:read("1").Data._ReleaseToken)
 	end)
 
+	scenario("a release answered with another server's data ends its hold when the next load reads the key", function()
+		local serverA, storeA = boot("A")
+		local old = serverA:player(1)
+		t:expect(storeA:loadAsync(old))
+		local lost = serverA:fault("1", "lost", { match = isFinalSave }) -- The final save commits; its answer is lost.
+		serverA:leave(old)
+		storeA:unloadAsync(old)
+		waitFor(function()
+			return table.find(serverA.faults, lost) == nil
+		end, "the final save commits")
+		local retry = serverA:fault("1", "hold", { phase = "before" })
+		-- Another server loads and releases before the retry, which then writes nothing and answers with its data.
+		local serverB, storeB = boot("B")
+		local other = serverB:player(1)
+		t:expect(storeB:loadAsync(other))
+		t:expect(storeB:trySet(other, "Coins", 7))
+		serverB:leave(other)
+		storeB:unloadAsync(other)
+		waitFor(released(storeB, 1), "B's release")
+		retry.open()
+		waitFor(function()
+			return table.find(serverA.faults, retry) == nil
+		end, "A's retry")
+		task.wait(0.2)
+		t:expectNotNil(storeA._releasing[1], "no token of ours ever lands")
+		local player = serverA:player(1)
+		local call = spawnCall(storeA.loadAsync, storeA, player)
+		task.wait(0.2)
+		t:expect(not call.done, "the load waits on the hold")
+		serverA:advance(5)
+		waitFor(function()
+			return call.done
+		end, "the read of the key ends the hold")
+		t:expectEqual(call.result[1], true)
+		t:expectEqual(storeA:getData(player).Coins, 7)
+	end)
+
 	-- Messages ------------------------------------------------------------------
 
 	scenario("an outbox entry is sent once it is saved, then deleted", function()
@@ -475,6 +519,59 @@ return function(Runtime, TestRunner)
 		end))
 		task.wait(0.2)
 		t:expectEqual(#cluster:queue("2"), 1, "sent once")
+	end)
+
+	scenario("a sender whose release is refused after a steal never sends its unsaved entry", function()
+		local serverA, storeA = boot("A")
+		local player = serverA:player(1)
+		t:expect(storeA:loadAsync(player))
+		local profile = storeA._profiles[1]
+		local outage = serverA:fault("1", "error", { count = math.huge, match = isFinalSave })
+		t:expect(storeA:trySetMany(player, {
+			{ path = "Receipts/P", value = true },
+			storeA:outboxUpdate { to = 2, kind = "gift", id = "gift:P" },
+		}))
+		serverA:leave(player)
+		storeA:unloadAsync(player)
+		task.wait(0.2)
+		-- The thief decides the same id afresh, for another recipient, and saves it.
+		local serverB, storeB = boot("B", { timeOffset = 700 })
+		local thief = serverB:player(1)
+		t:expect(storeB:loadAsync(thief))
+		t:expectNil(storeB:getData(thief).MailOutbox["gift:P"], "A's decision never landed")
+		send(storeB, thief, 3, "gift:P")
+		waitFor(function()
+			return #cluster:queue("3") == 1
+		end, "the thief sends its decision")
+		outage.clear()
+		waitFor(function()
+			return profile.LastSavedData.MailOutbox["gift:P"] ~= nil
+		end, "A's refused retry answers with the thief's data", 30)
+		task.wait(0.3)
+		t:expectEqual(#cluster:queue("2"), 0, "A's unsaved entry is not sent under the thief's saved id")
+		t:expectEqual(#cluster:queue("3"), 1)
+	end)
+
+	scenario("an id rewritten while its send is in flight is kept and sent as its own write", function()
+		local server, store = boot("A")
+		local player = server:player(1)
+		t:expect(store:loadAsync(player))
+		local inFlight = server:fault("2", "hold", { phase = "before" }) -- MessageAsync's append to user 2.
+		send(store, player, 2, "gift:1")
+		task.wait(0.2)
+		t:expect(store:trySetMany(player, { store:outboxUpdate { to = 3, kind = "gift", id = "gift:1" } }))
+		inFlight.open()
+		waitFor(function()
+			return #cluster:queue("2") == 1
+		end, "the first write is sent")
+		task.wait(0.2)
+		t:expectEqual(store:getData(player).MailOutbox["gift:1"].to, 3, "the rewrite is not deleted unsent")
+		t:expect(store:confirmSavedAsync(player, function(data)
+			return data.MailOutbox["gift:1"] ~= nil and data.MailOutbox["gift:1"].to == 3
+		end))
+		waitFor(function()
+			return #cluster:queue("3") == 1 and store:getData(player).MailOutbox["gift:1"] == nil
+		end, "the rewrite is sent, then deleted")
 	end)
 
 	scenario("an entry refused while closing waits for the sender's next session", function()
@@ -639,6 +736,44 @@ return function(Runtime, TestRunner)
 		waitFor(function()
 			return #cluster:queue("2") == 0
 		end, "both removed")
+	end)
+
+	scenario("a handler that writes data itself, or returns no plan, consumes nothing", function()
+		local serverA, storeA = boot("A")
+		local sender = serverA:player(1)
+		t:expect(storeA:loadAsync(sender))
+		local modes = { "mutate", "missing", "false", "number" }
+		for _, mode in modes do
+			t:expect(storeA:trySetMany(sender, {
+				storeA:outboxUpdate { to = 2, kind = "gift", id = `gift:{mode}`, body = { mode = mode, amount = 1 } },
+			}))
+		end
+		t:expect(storeA:confirmSavedAsync(sender, function(data)
+			return data.MailOutbox["gift:number"] ~= nil
+		end))
+		waitFor(function()
+			return #cluster:queue("2") == #modes
+		end, "send")
+		local serverB, storeB = boot("B")
+		local disconnect = storeB:onMessage("gift", function(_player, data, body)
+			if body.mode == "mutate" then
+				data.Coins += 50
+				return nil, "not ready"
+			elseif body.mode == "missing" then
+				local plan = nil -- A planner that failed.
+				return { updates = plan }
+			elseif body.mode == "false" then
+				return { updates = false }
+			end
+			return { updates = 123 }
+		end)
+		local player = serverB:player(2)
+		t:expect(storeB:loadAsync(player))
+		t:expectEqual(storeB:getData(player).Coins, 0)
+		t:expectNil(next(storeB:getData(player).MailInbox), "nothing marked")
+		disconnect()
+		storeB:onMessage("gift", gift)
+		t:expectEqual(storeB:getData(player).Coins, #modes, "each applies once its handler plans")
 	end)
 
 	scenario("a message that arrives as the Player leaves applies in the next session", function()

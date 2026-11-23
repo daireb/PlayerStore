@@ -130,6 +130,8 @@ function Cluster.new(Runtime: any)
 				end
 				stored[key] = serde.encode("json", value)
 				cluster.writes += 1
+				-- Answer with this write, not whatever another server wrote while the response was held.
+				local committed, info = stored[key], keyInfo()
 				if fault and fault.kind == "hold" and fault.phase == "after" then
 					waitForGate(fault)
 				end
@@ -139,7 +141,7 @@ function Cluster.new(Runtime: any)
 				if fault and fault.kind == "lost" then
 					error("injected: the write committed but its response was lost")
 				end
-				return serde.decode("json", stored[key]), keyInfo()
+				return serde.decode("json", committed), info
 			end
 			function dataStore.GetAsync(_, key: string)
 				api()
