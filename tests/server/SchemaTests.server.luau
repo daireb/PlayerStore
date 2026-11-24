@@ -177,10 +177,13 @@ t:test("schema rejects unsafe and cyclic defaults", function()
 	end, "slash in schema key rejected")
 end)
 
-t:test("schema rejects reserved version and array roots", function()
+t:test("schema rejects reserved roots and array roots", function()
 	t:expectError(function()
 		schema { _DataVersion = 0 }
 	end, "version field is library-owned")
+	t:expectError(function()
+		schema { _ReleaseToken = "" }
+	end, "release token is library-owned")
 	t:expectError(function()
 		schema { "A", "B" }
 	end, "root must use named fields")

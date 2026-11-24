@@ -10,6 +10,11 @@ local Schema = require(script.Schema)
 local ServerStore = require(script.ServerStore)
 local ClientStore = require(script.ClientStore)
 
+export type Outgoing = ServerStore.Outgoing
+export type MessageMeta = ServerStore.MessageMeta
+export type MessageResult = ServerStore.MessageResult
+export type MessageHandler = ServerStore.MessageHandler
+
 return {
 	schema = Schema.schema,
 	map = Schema.map,
