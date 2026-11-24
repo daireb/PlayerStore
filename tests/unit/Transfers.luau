@@ -397,7 +397,9 @@ return function(Runtime, TestRunner)
 		store:unloadAsync(old)
 		local player = server:player(1)
 		local call = spawnCall(store.loadAsync, store, player)
-		task.wait(0.3)
+		task.wait(0.1)
+		server:advance(5) -- The probe reads the key while the final save is in backoff: our lock, our load count.
+		task.wait(0.4)
 		t:expect(not call.done, "the new session waits for the release")
 		waitFor(function()
 			return call.done
@@ -487,12 +489,26 @@ return function(Runtime, TestRunner)
 
 	-- Messages ------------------------------------------------------------------
 
+	scenario("a queued message asks for its own save and is sent without a confirmation", function()
+		local server, store = boot("A")
+		local player = server:player(1)
+		t:expect(store:loadAsync(player))
+		t:expect(store:trySetMany(player, { store:outboxUpdate { to = 2, kind = "gift", id = "gift:1" } }))
+		waitFor(function()
+			return #cluster:queue("2") == 1
+		end, "sent long before the autosave", 2)
+		waitFor(function()
+			return store:getData(player).MailOutbox["gift:1"] == nil
+		end, "delete after send")
+	end)
+
 	scenario("an outbox entry is sent once it is saved, then deleted", function()
 		local server, store = boot("A")
 		local player = server:player(1)
 		t:expect(store:loadAsync(player))
 		t:expect(store:trySet(player, "Coins", 1))
 		local held = server:fault("1", "hold", { phase = "after" })
+		local queued = server:fault("1", "hold", { phase = "before" }) -- The save the entry's write requests.
 		local earlier = spawnCall(store.confirmSavedAsync, store, player, function(data)
 			return data.Coins == 1
 		end)
@@ -505,12 +521,10 @@ return function(Runtime, TestRunner)
 		end, "the earlier save answers")
 		task.wait(0.2)
 		t:expectEqual(#cluster:queue("2"), 0, "an unsaved decision is never sent")
-		t:expect(store:confirmSavedAsync(player, function(data)
-			return data.MailOutbox["gift:1"] ~= nil
-		end))
+		queued.open()
 		waitFor(function()
 			return #cluster:queue("2") == 1
-		end, "send")
+		end, "the entry's own save sends it")
 		waitFor(function()
 			return store:getData(player).MailOutbox["gift:1"] == nil
 		end, "delete after send")
@@ -559,6 +573,7 @@ return function(Runtime, TestRunner)
 		local inFlight = server:fault("2", "hold", { phase = "before" }) -- MessageAsync's append to user 2.
 		send(store, player, 2, "gift:1")
 		task.wait(0.2)
+		local rewriteSave = server:fault("1", "hold", { phase = "before" })
 		t:expect(store:trySetMany(player, { store:outboxUpdate { to = 3, kind = "gift", id = "gift:1" } }))
 		inFlight.open()
 		waitFor(function()
@@ -566,9 +581,7 @@ return function(Runtime, TestRunner)
 		end, "the first write is sent")
 		task.wait(0.2)
 		t:expectEqual(store:getData(player).MailOutbox["gift:1"].to, 3, "the rewrite is not deleted unsent")
-		t:expect(store:confirmSavedAsync(player, function(data)
-			return data.MailOutbox["gift:1"] ~= nil and data.MailOutbox["gift:1"].to == 3
-		end))
+		rewriteSave.open()
 		waitFor(function()
 			return #cluster:queue("3") == 1 and store:getData(player).MailOutbox["gift:1"] == nil
 		end, "the rewrite is sent, then deleted")
@@ -774,6 +787,133 @@ return function(Runtime, TestRunner)
 		disconnect()
 		storeB:onMessage("gift", gift)
 		t:expectEqual(storeB:getData(player).Coins, #modes, "each applies once its handler plans")
+	end)
+
+	scenario("a handler that writes through the store and defers leaves nothing written", function()
+		local serverA, storeA = boot("A")
+		local sender = serverA:player(1)
+		t:expect(storeA:loadAsync(sender))
+		send(storeA, sender, 2, "gift:1")
+		send(storeA, sender, 2, "gift:2")
+		waitFor(function()
+			return #cluster:queue("2") == 2
+		end, "send")
+		local serverB, storeB = boot("B")
+		local refusals = {}
+		local disconnect = storeB:onMessage("gift", function(player, data)
+			-- A nested delivery must not lift the refusal for the handler that started it.
+			storeB:retryMessages(player)
+			local ok, err = storeB:trySet(player, "Coins", data.Coins + 10)
+			table.insert(refusals, not ok and string.find(err, "must return their writes in the plan", 1, true) ~= nil)
+			return nil, "pass ownership unknown"
+		end)
+		local player = serverB:player(2)
+		t:expect(storeB:loadAsync(player))
+		for index = 1, 3 do
+			t:expect(storeB:trySet(player, `Receipts/r{index}`, true))
+			t:expect(storeB:confirmSavedAsync(player, receipt(`r{index}`)))
+		end
+		t:expect(#refusals > 3, "each save retries the deferred messages")
+		t:expectNil(table.find(refusals, false), "every write from inside the handler is refused")
+		t:expectEqual(storeB:getData(player).Coins, 0)
+		t:expectEqual(cluster:read("2").Data.Coins, 0)
+		t:expectNil(next(storeB:getData(player).MailInbox), "nothing marked")
+		disconnect()
+		storeB:onMessage("gift", gift)
+		t:expectEqual(storeB:getData(player).Coins, 2, "each applies once its handler plans")
+	end)
+
+	scenario("a handler that edits the body and defers is retried with the body as sent", function()
+		local serverA, storeA = boot("A")
+		local sender = serverA:player(1)
+		t:expect(storeA:loadAsync(sender))
+		send(storeA, sender, 2, "gift:1")
+		waitFor(function()
+			return #cluster:queue("2") == 1
+		end, "send")
+		local serverB, storeB = boot("B")
+		local runs, edited = 0, false
+		storeB:onMessage("gift", function(player, data, body)
+			runs += 1
+			edited = pcall(function()
+				body.amount += 10
+			end) or edited
+			if runs == 1 then
+				return nil, "not ready"
+			end
+			return gift(player, data, body)
+		end)
+		local player = serverB:player(2)
+		t:expect(storeB:loadAsync(player))
+		storeB:retryMessages(player)
+		t:expectEqual(runs, 2)
+		t:expect(not edited, "the body is frozen")
+		t:expectEqual(storeB:getData(player).Coins, 1)
+	end)
+
+	scenario("a plan whose write fails consumes nothing and applies once it is valid", function()
+		local serverA, storeA = boot("A")
+		local sender = serverA:player(1)
+		t:expect(storeA:loadAsync(sender))
+		send(storeA, sender, 2, "gift:1")
+		waitFor(function()
+			return #cluster:queue("2") == 1
+		end, "send")
+		local serverB, storeB = boot("B")
+		local disconnect = storeB:onMessage("gift", function()
+			return { updates = { { path = "Receipts/ok", value = true }, { path = "Coins", value = "not a number" } } }
+		end)
+		local player = serverB:player(2)
+		t:expect(storeB:loadAsync(player))
+		t:expectEqual(storeB:getData(player).Coins, 0)
+		t:expectNil(storeB:getData(player).Receipts.ok, "no part of the failed write lands")
+		t:expectNil(next(storeB:getData(player).MailInbox), "nothing marked")
+		t:expect(storeB:trySet(player, "Receipts/other", true))
+		t:expect(storeB:confirmSavedAsync(player, receipt("other")))
+		task.wait(0.2)
+		t:expectEqual(#cluster:queue("2"), 1, "a failed write must not remove the message")
+		disconnect()
+		storeB:onMessage("gift", gift)
+		t:expectEqual(storeB:getData(player).Coins, 1)
+	end)
+
+	scenario("an empty plan with after consumes the message, and after alone defers", function()
+		local serverA, storeA = boot("A")
+		local sender = serverA:player(1)
+		t:expect(storeA:loadAsync(sender))
+		send(storeA, sender, 2, "note:1", "note")
+		send(storeA, sender, 2, "ping:1", "ping")
+		waitFor(function()
+			return #cluster:queue("2") == 2
+		end, "send")
+		local serverB, storeB = boot("B")
+		local notes, pings, afterWrote = 0, 0, nil
+		storeB:onMessage("note", function(player)
+			return {
+				updates = {},
+				after = function()
+					notes += 1
+					afterWrote = storeB:trySet(player, "Coins", 5)
+				end,
+			}
+		end)
+		storeB:onMessage("ping", function()
+			return {
+				after = function()
+					pings += 1
+				end,
+			}
+		end)
+		local player = serverB:player(2)
+		t:expect(storeB:loadAsync(player))
+		waitFor(function()
+			return #cluster:queue("2") == 1
+		end, "the note is removed")
+		t:expectEqual(notes, 1)
+		t:expectEqual(afterWrote, true, "after may write through the store")
+		t:expectNotNil(storeB:getData(player).MailInbox["note:1"])
+		t:expectEqual(pings, 0)
+		t:expectNil(storeB:getData(player).MailInbox["ping:1"], "a plan with only after defers")
 	end)
 
 	scenario("a message that arrives as the Player leaves applies in the next session", function()

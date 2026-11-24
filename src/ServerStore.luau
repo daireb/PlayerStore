@@ -452,6 +452,8 @@ function ServerStore._openSession(self: any, userId: number, profile: any): any
 		deferred = {} :: { [() -> ()]: any },
 		warned = {} :: { [string]: boolean },
 		sent = {} :: { [string]: boolean },
+		--- Set while a message handler runs; tracked writes to this profile are refused meanwhile.
+		planning = false,
 		connections = {} :: { any },
 	}
 	self._sessions[profile] = session
@@ -496,8 +498,9 @@ end
 
 --- Ends a release hold if a view of the key shows the released session can never write again: a newer
 --- session started, or ours cleared the lock (the fence rule). This covers a release whose final save was
---- refused, or answered with someone else's data, so its token never lands. A view can only be stale,
---- and these facts never revert, so a cached read only delays the load.
+--- refused, or answered with someone else's data, so its token never lands. While SessionLoadCount never
+--- goes down these facts never revert, so a cached read only delays the load. A removed, reset or restored
+--- key breaks that: its hold lasts until the key's count catches up, or while the key stays missing.
 function ServerStore._probeRelease(self: any, userId: number)
 	local profile = self._releasing[userId]
 	if profile == nil or self._releaseProbes[profile] then
@@ -692,14 +695,19 @@ function ServerStore._deliver(self: any, session: any, message: any, processed: 
 	local thread = coroutine.create(handler)
 	-- A frozen copy, so a handler that writes data itself errors instead of leaving an effect with no
 	-- inbox mark, which a later save would carry and a redelivery would apply again. Messages are rare,
-	-- so the copy's cost is per delivery, not per frame.
+	-- so the copy's cost is per delivery, not per frame. The body is frozen for the same reason: a
+	-- deferred message is retried with this same table. The planning flag is restored, not cleared,
+	-- because a handler that reaches retryMessages or onMessage runs a nested delivery.
+	local wasPlanning = session.planning
+	session.planning = true
 	local ok, result, reason = coroutine.resume(
 		thread,
 		player,
 		deepFreeze(deepClone(profile.Data)),
-		message.body,
+		deepFreeze(message.body),
 		table.freeze { id = id, from = message.from }
 	)
+	session.planning = wasPlanning
 	if coroutine.status(thread) ~= "dead" then
 		-- Cancelled, not closed: the scheduler may hold it in a wait, and must never resume it.
 		task.cancel(thread)
@@ -870,13 +878,32 @@ function ServerStore.loadAsync(self: any, player: Player): boolean
 		return complete(false)
 	end
 
+	local outboxPrefix = if self._mailbox then `{self._mailbox.outbox}/` else nil
+	local function queuesMessage(path: string, value: any): boolean
+		return value ~= nil and string.sub(path, 1, #outboxPrefix) == outboxPrefix
+	end
 	local observable = ObservableTable.wrap(profile.Data, function(path, value)
 		if self:_activeProfile(player) ~= profile then
 			return false, "Data not loaded"
 		end
+		if session.planning then
+			-- A write that lands outside the plan has no inbox mark, so a deferral would apply it again.
+			return false, "message handlers must return their writes in the plan"
+		end
 		return Validation.validateWrite(self._schema, path, value)
 	end, function(path, value, updates)
 		self:_sendDelta(player, profile, path, value, updates)
+		if outboxPrefix == nil then
+			return
+		end
+		-- The relay only sends saved entries, so without a save a queued message waits for the autosave.
+		local queued = if updates then false else queuesMessage(path, value)
+		for _, update in updates or {} do
+			queued = queued or queuesMessage(update.path, update.value)
+		end
+		if queued then
+			self:_requestSave(profile)
+		end
 	end)
 	self._profiles[userId] = profile
 	self._owners[userId] = player
@@ -1109,9 +1136,10 @@ function ServerStore.confirmSavedAsync(
 	end
 end
 
---- Handles messages of `kind`. The handler plans against `data`, a frozen copy, and must not yield: a
---- yielding handler is cancelled and its message deferred. Return nil plus a reason to defer; deferred
---- messages are retried, never dropped. A plan needs `updates` or `send`; `{ updates = {} }` consumes on purpose.
+--- Handles messages of `kind`. The handler plans against `data`, a frozen copy, and a frozen `body`, and
+--- tracked writes to that player are refused while it runs. It must not yield: a yielding handler is
+--- cancelled and its message deferred. Return nil plus a reason to defer; deferred messages are retried,
+--- never dropped. A plan needs `updates` or `send`; `{ updates = {} }` consumes on purpose.
 function ServerStore.onMessage(self: any, kind: string, handler: MessageHandler): () -> ()
 	assert(self._mailbox ~= nil, "[PlayerStore] onMessage needs the mailbox option")
 	assert(type(kind) == "string" and kind ~= "", "[PlayerStore] message kind must be a non-empty string")
