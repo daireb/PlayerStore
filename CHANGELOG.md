@@ -4,6 +4,13 @@ All notable changes to PlayerStore will be documented in this file.
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `sendAsync(message)` sends a message straight to the recipient's queue, for operator tools that hold no sender session: it needs the `mailbox` option, checks the message as `outboxUpdate` does, writes no outbox and yields until ProfileStore stores it. It returns `true` once stored, and `false` with a reason when ProfileStore is closing, the call errors or the store is destroyed. The send is not exactly-once, but the receiver applies an id once, so resending the same id is safe. Its envelope's `from` is the new `PlayerStore.OPERATOR_SENDER` (`0`), so a handler can tell an operator's message from a player's.
+- `PlayerStore.validateWrite(schema, path, value)` is exported, as its documentation already showed.
+
 ## [0.5.0] - 2026-11-24
 
 ### Added

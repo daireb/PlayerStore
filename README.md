@@ -83,7 +83,7 @@ end
 
 Keep read/check/write code synchronous. Batches commit all writes before notifying listeners or replicating; **this is in-memory atomicity, not a confirmed DataStore save**. Batch paths must be disjoint: no duplicates or ancestor/descendant pairs. Replace a parent with its complete new value instead. Use `value = nil` to delete a dynamic map entry.
 
-Paths use string keys separated by `/`. Values must be finite numbers, booleans, valid UTF-8 strings or plain acyclic tables. Tables are string dictionaries or dense arrays; replace arrays as whole values. `map` relaxes structural checks, not persistence checks. Fixed fields retain their declared types. `_DataVersion` and `_ReleaseToken` are reserved; `_ReleaseToken` is written by the release save and stays in a profile's data after the next load.
+Paths use string keys separated by `/`. Values must be finite numbers, booleans, valid UTF-8 strings or plain acyclic tables. Tables are string dictionaries or dense arrays; replace arrays as whole values. `map` relaxes structural checks, not persistence checks. Fixed fields retain their declared types. `PlayerStore.validateWrite(schema, path, value)` returns `(boolean, error?)` for one write against a schema without a store; it is pure and never yields, so a message handler can pre-check its plan. `_DataVersion` and `_ReleaseToken` are reserved; `_ReleaseToken` is written by the release save and stays in a profile's data after the next load.
 
 ## API
 
@@ -102,6 +102,7 @@ Paths use string keys separated by `/`. Values must be finite numbers, booleans,
 | `onSessionEnd(callback)` | Replaces the kick handler for unexpected session loss. Explicit unload does not call it. |
 | `onMessage(kind, handler)` | Registers the handler for messages of `kind`; returns a disconnect function. See [Transfers between players](#transfers-between-players). |
 | `outboxUpdate(message)` | Returns the update that queues `{ to, kind, id, body }`, stamped with a fresh nonce; put it in the same `trySetMany` as the decision it belongs to. |
+| `sendAsync(message)` | Yields; sends `{ to, kind, id, body }` straight to the recipient's queue with `from = PlayerStore.OPERATOR_SENDER`, needing no loaded player. Returns `(boolean, error?)`: `true` once ProfileStore stored it, `false` when ProfileStore is closing, the call errors or the store is destroyed. Resend the same id after `false` or a timeout. |
 | `retryMessages(player)` | Retries that session's deferred messages now. |
 | `wipeData(player, keep?)` | Resets schema fields, except the mailbox roots and any root fields named in `keep`, and kicks the player; the game's removal handler releases the profile. Keep receipt marks that bind outbox entries: wiping one while its receipt is still pending lets the redelivery decide again. |
 | `Destroy()` | Runs before-release hooks, then cancels loads, disconnects callbacks, releases sessions and destroys the remote. Final save uses committed data. Idempotent. |
@@ -152,6 +153,14 @@ store:onMessage("gift", function(player, data, body, meta)
     }
 end)
 ```
+
+Operator tools (an admin command, an Open Cloud Luau task) that change a save with no sender profile use `sendAsync` instead, from any server with the store, whether the recipient is on this server, another one or offline:
+
+```lua
+local ok, err = store:sendAsync { to = userId, kind = "grant", id = `grant:{ticketId}`, body = { item = "Sword" } }
+```
+
+It writes no outbox and yields until ProfileStore has stored the message (`MessageAsync` retries DataStore errors itself). Its handler sees `meta.from == PlayerStore.OPERATOR_SENDER` (`0`, which no player has), so it can tell an operator's message from a player's; don't reply to it. The send is not exactly-once: after `false` or a timeout, send the same id again, since the receiver applies an id once. Ids share the outbox's namespace and rules, and validate the recipient yourself, as for outbox sends.
 
 - Ids are idempotency keys: unique across senders and kinds, so prefix them with the kind. The receiver applies an id once, however often it arrives. Write each id once: a rewrite of an id that was already sent reaches its new recipient as a second message.
 - Handlers plan against `data`, a frozen copy, and a frozen `body`, and return writes; they never yield or write themselves. A write to `data` or `body` errors and defers the message, and a tracked write to the receiving player is refused while its handler runs: writes go in the plan. The live save equals `data` while a handler runs, so helpers that read through the store are safe. A plan needs `updates` or `send` (tables), so a planner that returned `nil` defers rather than consuming the message; return `{ updates = {} }` to consume one on purpose. A yielding handler is cancelled and its message deferred. Return `nil, reason` to defer a message (for example until something it needs has loaded), then call `retryMessages(player)`. Deferred messages, unknown kinds and handlers that error are retried on later saves, on `onMessage` and in the next session, never dropped.
