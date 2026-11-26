@@ -9,6 +9,7 @@
 local Schema = require(script.Schema)
 local ServerStore = require(script.ServerStore)
 local ClientStore = require(script.ClientStore)
+local Validation = require(script.Validation)
 
 export type Outgoing = ServerStore.Outgoing
 export type MessageMeta = ServerStore.MessageMeta
@@ -19,7 +20,10 @@ return {
 	schema = Schema.schema,
 	map = Schema.map,
 	private = Schema.private,
+	validateWrite = Validation.validateWrite,
 
 	createServerStore = ServerStore.new,
 	createClientStore = ClientStore.new,
+
+	OPERATOR_SENDER = ServerStore.OPERATOR_SENDER,
 }

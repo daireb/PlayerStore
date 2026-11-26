@@ -72,6 +72,9 @@ return function(Runtime, TestRunner)
 		t:expectError(function()
 			store:outboxUpdate { to = 2, kind = "gift", id = "gift:1" }
 		end)
+		t:expectError(function()
+			store:sendAsync { to = 2, kind = "gift", id = "gift:1" }
+		end)
 		t:expect(store:loadAsync(player))
 		t:expectEqual(#world.profiles[1].messageHandlers, 0)
 		store:Destroy()
@@ -94,11 +97,56 @@ return function(Runtime, TestRunner)
 			t:expectError(function()
 				store:outboxUpdate(message)
 			end, message.id)
+			t:expectError(function()
+				store:sendAsync(message)
+			end, `sendAsync {message.id}`)
 		end
 		t:expectError(function()
 			store:onMessage("gift", gift)
 			store:onMessage("gift", gift)
 		end, "one handler per kind")
+		store:Destroy()
+	end)
+
+	t:test("sendAsync needs no session and reports ProfileStore closing or a destroyed store", function()
+		local _, store, _, library = fakeStore(nil, MAILBOX)
+		local sent = {}
+		local outcomes = { true, true, false }
+		store._playerStore.MessageAsync = function(_, key, envelope)
+			table.insert(sent, { key = key, envelope = envelope })
+			local outcome = table.remove(outcomes, 1)
+			if outcome == nil then
+				error("502: injected")
+			end
+			return outcome
+		end
+		local message = { to = 2, kind = "grant", id = "grant:1", body = { amount = 1 } }
+		t:expectEqual(store:sendAsync(message), true)
+		t:expectEqual(sent[1].key, "2")
+		t:expectEqual(sent[1].envelope.from, library.OPERATOR_SENDER)
+		t:expectEqual(sent[1].envelope.id, "grant:1")
+		t:expectEqual(sent[1].envelope.body.amount, 1)
+		t:expectEqual(store:sendAsync { to = 2, kind = "grant", id = "grant:2" }, true, "no body, as an outbox entry")
+		local ok, reason = store:sendAsync(message)
+		t:expectEqual(ok, false, "closing")
+		t:expectNotNil(reason)
+		-- MessageAsync can't raise for a valid key and envelope today; this guards the defensive pcall.
+		ok, reason = store:sendAsync(message)
+		t:expectEqual(ok, false, "a raising MessageAsync")
+		t:expectNotNil(reason)
+		store:Destroy()
+		t:expectEqual(store:sendAsync(message), false, "destroyed")
+		t:expectEqual(#sent, 4, "a destroyed store sends nothing")
+	end)
+
+	t:test("validateWrite accepts and refuses the same root field writes as a tracked write", function()
+		local _, store, player, library = fakeStore()
+		local schema = transferSchema(library)
+		t:expect(store:loadAsync(player))
+		t:expectEqual(library.validateWrite(schema, "Coins", 5), true)
+		t:expectEqual(store:trySet(player, "Coins", 5), true)
+		t:expectEqual(library.validateWrite(schema, "Coins", "5"), false)
+		t:expectEqual(store:trySet(player, "Coins", "5"), false)
 		store:Destroy()
 	end)
 
@@ -980,6 +1028,67 @@ return function(Runtime, TestRunner)
 		waitFor(function()
 			return #cluster:queue("1") == 0 and cluster:read("1").Data.MailOutbox["gift:self"] == nil
 		end, "queue and outbox drain")
+	end)
+
+	local function operatorGift(senders: { number })
+		return function(player, data, body, meta)
+			table.insert(senders, meta.from)
+			return gift(player, data, body)
+		end
+	end
+
+	scenario("an operator message to a player on this server applies once however often it is sent", function()
+		local server, store = boot("A")
+		local senders = {}
+		store:onMessage("gift", operatorGift(senders))
+		local player = server:player(2)
+		t:expect(store:loadAsync(player))
+		local message = { to = 2, kind = "gift", id = "gift:op", body = { amount = 2 } }
+		t:expectEqual(store:sendAsync(message), true)
+		waitFor(function()
+			return store:getData(player).Coins == 2
+		end, "applied")
+		t:expectNotNil(store:getData(player).MailInbox["gift:op"], "with its inbox mark")
+		t:expectEqual(store:sendAsync(message), true, "a retry with the same id")
+		task.wait(0.5) -- The save sendAsync's MessageAsync starts hands the copy over; the next one removes it.
+		t:expect(store:trySet(player, "Receipts/flush", true))
+		t:expect(store:confirmSavedAsync(player, receipt("flush")))
+		waitFor(function()
+			return #cluster:queue("2") == 0
+		end, "both copies removed")
+		t:expectEqual(store:getData(player).Coins, 2, "applied once")
+		t:expectEqual(#senders, 1)
+		t:expectEqual(senders[1], server.library.OPERATOR_SENDER)
+		t:expectNil(next(store:getData(player).MailOutbox), "no outbox is written")
+	end)
+
+	scenario("an operator message whose body the data store can't hold fails at once and queues nothing", function()
+		local _, operator = boot("A")
+		local result = {}
+		task.spawn(function()
+			result.ok, result.reason =
+				operator:sendAsync { to = 2, kind = "gift", id = "gift:fn", body = { f = function() end } }
+		end)
+		t:expectEqual(result.ok, false, "returned without yielding")
+		t:expectNotNil(result.reason)
+		t:expectEqual(#cluster:queue("2"), 0)
+	end)
+
+	scenario("an operator message reaches an offline player at load and one on another server", function()
+		local serverA, operator = boot("A")
+		t:expectEqual(operator:sendAsync { to = 2, kind = "gift", id = "gift:offline", body = { amount = 1 } }, true)
+		t:expectEqual(#cluster:queue("2"), 1)
+		local serverB, storeB = boot("B")
+		local senders = {}
+		storeB:onMessage("gift", operatorGift(senders))
+		local player = serverB:player(2)
+		t:expect(storeB:loadAsync(player))
+		t:expectEqual(storeB:getData(player).Coins, 1, "applied inside loadAsync")
+		t:expectEqual(operator:sendAsync { to = 2, kind = "gift", id = "gift:live", body = { amount = 2 } }, true)
+		waitFor(function()
+			return storeB:getData(player).Coins == 3
+		end, "applied on the server that holds the session")
+		t:expectEqual(senders[2], serverA.library.OPERATOR_SENDER)
 	end)
 
 	scenario("a sender stolen after sending resends, and the receiver applies once", function()

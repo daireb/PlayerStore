@@ -29,6 +29,8 @@ local RELEASE_PROBE_INTERVAL = 5
 local SNAPSHOT_COOLDOWN = 1
 --- Envelope version this build reads; a newer envelope waits for a newer server.
 local MESSAGE_VERSION = 1
+--- `from` of a message sent with `sendAsync`: no player has UserId 0, and a relayed entry carries its sender's.
+local OPERATOR_SENDER = 0
 
 local function deepFreeze<T>(value: T): T
 	if type(value) == "table" and not table.isfrozen(value) then
@@ -114,6 +116,7 @@ export type MessageHandler = (player: Player, data: any, body: any, meta: Messag
 
 local ServerStore = {}
 ServerStore.__index = ServerStore
+ServerStore.OPERATOR_SENDER = OPERATOR_SENDER
 
 local function cancelSnapshotTimer(self: any, player: Player)
 	local timer = self._snapshotTimers[player]
@@ -1160,11 +1163,7 @@ function ServerStore.onMessage(self: any, kind: string, handler: MessageHandler)
 	end
 end
 
---- Builds the write that queues `message`; put it in the same trySetMany as the decision it belongs to.
---- `id` must be unique across all senders and kinds (prefix it with the kind: "gift:<PurchaseId>"), and
---- written once: a rewrite of an id already sent reaches its new recipient as a second message.
-function ServerStore.outboxUpdate(self: any, message: Outgoing): ObservableTable.Update
-	assert(self._mailbox ~= nil, "[PlayerStore] outboxUpdate needs the mailbox option")
+local function checkOutgoing(message: Outgoing): (number, string, string)
 	assert(typeof(message) == "table", "[PlayerStore] message must be a table")
 	local to, kind, id = message.to, message.kind, message.id
 	assert(
@@ -1176,11 +1175,48 @@ function ServerStore.outboxUpdate(self: any, message: Outgoing): ObservableTable
 		type(id) == "string" and id ~= "" and not string.find(id, "/", 1, true),
 		"[PlayerStore] message.id must be a non-empty string without '/'"
 	)
+	return to, kind, id
+end
+
+--- Builds the write that queues `message`; put it in the same trySetMany as the decision it belongs to.
+--- `id` must be unique across all senders and kinds (prefix it with the kind: "gift:<PurchaseId>"), and
+--- written once: a rewrite of an id already sent reaches its new recipient as a second message.
+function ServerStore.outboxUpdate(self: any, message: Outgoing): ObservableTable.Update
+	assert(self._mailbox ~= nil, "[PlayerStore] outboxUpdate needs the mailbox option")
+	local to, kind, id = checkOutgoing(message)
 	return {
 		path = `{self._mailbox.outbox}/{id}`,
 		-- The nonce names this write, so the relay can tell a saved entry from an unsaved rewrite of its id.
 		value = { to = to, kind = kind, body = message.body, nonce = HttpService:GenerateGUID(false) },
 	}
+end
+
+--- Sends `message` straight to the recipient's queue, with `from = OPERATOR_SENDER`, for operator tools
+--- that hold no sender session; it writes no outbox. Ids follow outbox rules. Yields until ProfileStore
+--- stores it, retrying data store errors, so an outage keeps it yielding. `false` means an invalid body,
+--- ProfileStore closing or a store destroyed before the call. For a deadline, wrap the call and resend
+--- the same id: the receiver applies an id once.
+function ServerStore.sendAsync(self: any, message: Outgoing): (boolean, string?)
+	assert(self._mailbox ~= nil, "[PlayerStore] sendAsync needs the mailbox option")
+	local to, kind, id = checkOutgoing(message)
+	if self._destroyed then
+		return false, "Store destroyed"
+	end
+	local envelope = { v = MESSAGE_VERSION, id = id, kind = kind, from = OPERATOR_SENDER, body = message.body }
+	-- Checked as the outbox entry is, so a body the data store can't hold fails instead of retrying forever.
+	local valid, reason = DataValue.validate(envelope, "message")
+	if not valid then
+		return false, reason
+	end
+	-- Defensive: MessageAsync raises only for a bad key or a non-table message, which can't reach it here.
+	local ok, sent = pcall(self._playerStore.MessageAsync, self._playerStore, tostring(to), envelope)
+	if not ok then
+		return false, tostring(sent)
+	end
+	if sent ~= true then
+		return false, "ProfileStore is closing"
+	end
+	return true, nil
 end
 
 --- Retries this session's deferred messages now (e.g. once something a handler waited for is ready).
