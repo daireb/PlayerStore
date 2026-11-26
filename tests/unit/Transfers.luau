@@ -108,10 +108,10 @@ return function(Runtime, TestRunner)
 		store:Destroy()
 	end)
 
-	t:test("sendAsync needs no session and reports a send ProfileStore refused or failed", function()
+	t:test("sendAsync needs no session and reports ProfileStore closing or a destroyed store", function()
 		local _, store, _, library = fakeStore(nil, MAILBOX)
 		local sent = {}
-		local outcomes = { true, false }
+		local outcomes = { true, true, false }
 		store._playerStore.MessageAsync = function(_, key, envelope)
 			table.insert(sent, { key = key, envelope = envelope })
 			local outcome = table.remove(outcomes, 1)
@@ -126,18 +126,20 @@ return function(Runtime, TestRunner)
 		t:expectEqual(sent[1].envelope.from, library.OPERATOR_SENDER)
 		t:expectEqual(sent[1].envelope.id, "grant:1")
 		t:expectEqual(sent[1].envelope.body.amount, 1)
+		t:expectEqual(store:sendAsync { to = 2, kind = "grant", id = "grant:2" }, true, "no body, as an outbox entry")
 		local ok, reason = store:sendAsync(message)
 		t:expectEqual(ok, false, "closing")
 		t:expectNotNil(reason)
+		-- MessageAsync can't raise for a valid key and envelope today; this guards the defensive pcall.
 		ok, reason = store:sendAsync(message)
-		t:expectEqual(ok, false, "an error")
+		t:expectEqual(ok, false, "a raising MessageAsync")
 		t:expectNotNil(reason)
 		store:Destroy()
 		t:expectEqual(store:sendAsync(message), false, "destroyed")
-		t:expectEqual(#sent, 3, "a destroyed store sends nothing")
+		t:expectEqual(#sent, 4, "a destroyed store sends nothing")
 	end)
 
-	t:test("validateWrite agrees with what a tracked write accepts", function()
+	t:test("validateWrite accepts and refuses the same root field writes as a tracked write", function()
 		local _, store, player, library = fakeStore()
 		local schema = transferSchema(library)
 		t:expect(store:loadAsync(player))
@@ -1058,6 +1060,18 @@ return function(Runtime, TestRunner)
 		t:expectEqual(#senders, 1)
 		t:expectEqual(senders[1], server.library.OPERATOR_SENDER)
 		t:expectNil(next(store:getData(player).MailOutbox), "no outbox is written")
+	end)
+
+	scenario("an operator message whose body the data store can't hold fails at once and queues nothing", function()
+		local _, operator = boot("A")
+		local result = {}
+		task.spawn(function()
+			result.ok, result.reason =
+				operator:sendAsync { to = 2, kind = "gift", id = "gift:fn", body = { f = function() end } }
+		end)
+		t:expectEqual(result.ok, false, "returned without yielding")
+		t:expectNotNil(result.reason)
+		t:expectEqual(#cluster:queue("2"), 0)
 	end)
 
 	scenario("an operator message reaches an offline player at load and one on another server", function()

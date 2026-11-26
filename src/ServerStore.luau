@@ -1192,8 +1192,10 @@ function ServerStore.outboxUpdate(self: any, message: Outgoing): ObservableTable
 end
 
 --- Sends `message` straight to the recipient's queue, with `from = OPERATOR_SENDER`, for operator tools
---- that hold no sender session; it writes no outbox. Yields. `true` means ProfileStore stored it. After
---- `false` or a timeout, send the same id again: the receiver applies an id once. Ids follow outbox rules.
+--- that hold no sender session; it writes no outbox. Ids follow outbox rules. Yields until ProfileStore
+--- stores it, retrying data store errors, so an outage keeps it yielding. `false` means an invalid body,
+--- ProfileStore closing or a store destroyed before the call. For a deadline, wrap the call and resend
+--- the same id: the receiver applies an id once.
 function ServerStore.sendAsync(self: any, message: Outgoing): (boolean, string?)
 	assert(self._mailbox ~= nil, "[PlayerStore] sendAsync needs the mailbox option")
 	local to, kind, id = checkOutgoing(message)
@@ -1201,6 +1203,12 @@ function ServerStore.sendAsync(self: any, message: Outgoing): (boolean, string?)
 		return false, "Store destroyed"
 	end
 	local envelope = { v = MESSAGE_VERSION, id = id, kind = kind, from = OPERATOR_SENDER, body = message.body }
+	-- Checked as the outbox entry is, so a body the data store can't hold fails instead of retrying forever.
+	local valid, reason = DataValue.validate(envelope, "message")
+	if not valid then
+		return false, reason
+	end
+	-- Defensive: MessageAsync raises only for a bad key or a non-table message, which can't reach it here.
 	local ok, sent = pcall(self._playerStore.MessageAsync, self._playerStore, tostring(to), envelope)
 	if not ok then
 		return false, tostring(sent)
